@@ -1,45 +1,56 @@
-// src/auth.js
 import { UserManager } from 'oidc-client-ts';
 
-const HOSTED = process.env.AWS_COGNITO_HOSTED; // e.g. https://<your-prefix>.auth.us-east-1.amazoncognito.com
-const ISSUER = `https://cognito-idp.us-east-1.amazonaws.com/${process.env.AWS_COGNITO_POOL_ID}`;
-
-// Hand the endpoints to the library so it won't fetch /.well-known/*
-const metadata = {
-  issuer: ISSUER,
-  authorization_endpoint: `${HOSTED}/oauth2/authorize`,
-  token_endpoint: `${HOSTED}/oauth2/token`,
-  userinfo_endpoint: `${HOSTED}/oauth2/userInfo`,
-  end_session_endpoint: `${HOSTED}/logout`,
-  jwks_uri: `${ISSUER}/.well-known/jwks.json`,
-};
-
-export const userManager = new UserManager({
-  authority: ISSUER,              // <-- issuer, NOT the hosted UI
-  metadata,                       // <-- prevents discovery fetch (no CORS)
+const cognitoAuthConfig = {
+  authority: `https://cognito-idp.us-east-1.amazonaws.com/${process.env.AWS_COGNITO_POOL_ID}`,
   client_id: process.env.AWS_COGNITO_CLIENT_ID,
   redirect_uri: process.env.OAUTH_SIGN_IN_REDIRECT_URL,
   response_type: 'code',
-  scope: 'openid email phone',
+  scope: 'phone openid email',
   revokeTokenTypes: ['refresh_token'],
   automaticSilentRenew: false,
+};
+
+const userManager = new UserManager({
+  ...cognitoAuthConfig,
 });
 
+export { userManager };
+
+export async function signIn() {
+  await userManager.signinRedirect();
+}
+
+export async function signOut() {
+  try {
+    // Clear the user from the UserManager first
+    await userManager.removeUser();
+  } catch (error) {
+    console.error('Error clearing local session:', error);
+  }
+
+  // For Cognito, construct the Hosted UI logout URL using env-configured domain
+  const region = (process.env.AWS_COGNITO_POOL_ID || '').split('_')[0] || 'us-east-1';
+  const domainPrefix = process.env.AWS_COGNITO_DOMAIN;
+  if (!domainPrefix) {
+    console.error('Missing AWS_COGNITO_DOMAIN for logout');
+    return;
+  }
+  const logoutUrl = `https://${domainPrefix}.auth.${region}.amazoncognito.com/logout?client_id=${process.env.AWS_COGNITO_CLIENT_ID}&logout_uri=${encodeURIComponent(process.env.OAUTH_SIGN_IN_REDIRECT_URL)}`;
+  window.location.href = logoutUrl;
+}
+
 function formatUser(user) {
+  console.log('User Authenticated', { user });
   return {
-    username: user?.profile?.['cognito:username'],
-    email: user?.profile?.email,
-    idToken: user?.id_token,
-    accessToken: user?.access_token,
+    username: user.profile.preferred_username || user.profile.email,
+    email: user.profile.email,
+    idToken: user.id_token,
+    accessToken: user.access_token,
     authorizationHeaders: (type = 'application/json') => ({
       'Content-Type': type,
       Authorization: `Bearer ${user.id_token}`,
     }),
   };
-}
-
-export async function signIn() {
-  await userManager.signinRedirect();
 }
 
 export async function getUser() {

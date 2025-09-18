@@ -1,21 +1,23 @@
 {
   "name": "fragments-ui",
-  "version": "1.0.0",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "parcel index.html --port 1234"
-  },
-  "keywords": [],
-  "author": "Khiet Van Phan",
-  "license": "UNLICENSED",
+  "private": true,
+  "version": "0.0.1",
   "description": "Fragments UI testing web app",
-  "devDependencies": {
-    "parcel": "^2.15.4"
+  "scripts": {
+    "start": "parcel index.html",
+    "build": "parcel build index.html",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
+  "repository": {
+    "url": "https://github.com/khietvan123/CCP555-2025F-NSD-KhietVan-Phan-kvphan/tree/main/lab2"
+  },
+  "author": "Your Name",
+  "license": "UNLICENSED",
   "dependencies": {
-    "aws-jwt-verify": "^5.1.0",
-    "oidc-client-ts": "^3.3.0",
-    "passport": "^0.7.0",
-    "passport-http-bearer": "^1.0.1"
+    "oidc-client-ts": "^2.2.2"
+  },
+  "devDependencies": {
+    "@parcel/runtime-browser-hmr": "^2.15.4",
+    "parcel": "^2.15.4"
   }
 }
