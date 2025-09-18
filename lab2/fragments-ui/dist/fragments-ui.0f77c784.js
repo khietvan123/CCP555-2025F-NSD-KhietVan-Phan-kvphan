@@ -737,14 +737,10 @@ async function signIn() {
 }
 async function signOut() {
     const user = await userManager.getUser();
-    // 1) Clear local stored user so UI flips immediately after return
     await userManager.removeUser();
-    // 2) Hit Cognito's Hosted UI logout to clear its cookies (SSO)
     await userManager.signoutRedirect({
-        // what oidc-client-ts sends by default; some IdPs use this
         post_logout_redirect_uri: "http://localhost:1234",
         id_token_hint: user?.id_token,
-        // Cognito expects these query params:
         extraQueryParams: {
             client_id: "1u4b7afs2o5f6dlth01evtkse9",
             logout_uri: "http://localhost:1234"
