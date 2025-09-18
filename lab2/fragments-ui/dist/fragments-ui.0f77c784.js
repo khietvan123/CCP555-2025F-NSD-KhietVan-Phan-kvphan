@@ -667,32 +667,41 @@ function hmrAccept(bundle /*: ParcelRequire */ , id /*: string */ ) {
 }
 
 },{}],"2R06K":[function(require,module,exports,__globalThis) {
-var _authJs = require("./auth.js");
-var _apiJs = require("./api.js");
+// src/app.js
+var _auth = require("./auth");
+var _api = require("./api");
 async function init() {
     const userSection = document.querySelector('#user');
     const loginBtn = document.querySelector('#login');
-    const user = await (0, _authJs.getUser)();
-    if (user) {
-        userSection.innerHTML = `
-      <p>Welcome, ${user.username}!</p>
-      <button id="logout">Logout</button>
-    `;
-        const logoutBtn = document.querySelector('#logout');
-        logoutBtn.addEventListener('click', async ()=>{
-            await (0, _authJs.signOut)();
-        });
-        try {
-            const fragments = await (0, _apiJs.getUserFragments)(user);
-            console.log('User fragments:', fragments);
-        } catch (error) {
-            console.error('Failed to get fragments:', error);
-        }
-    } else loginBtn.addEventListener('click', (0, _authJs.signIn));
+    // default (not signed in yet)
+    userSection.hidden = true;
+    if (loginBtn) {
+        loginBtn.hidden = false;
+        loginBtn.onclick = ()=>(0, _auth.signIn)();
+    }
+    const user = await (0, _auth.getUser)();
+    if (!user) return; // still not signed in
+    // signed in → show user area, hide login
+    userSection.hidden = false;
+    if (loginBtn) loginBtn.hidden = true;
+    userSection.innerHTML = `
+    <p>Welcome, ${user.username}!</p>
+    <button id="logout">Logout</button>
+  `;
+    document.querySelector('#logout').onclick = async ()=>{
+        await (0, _auth.signOut)();
+    };
+    try {
+        const data = await (0, _api.getUserFragments)(user);
+        console.log('User fragments:', data);
+    } catch (err) {
+        console.error('Failed to get fragments:', err);
+    }
 }
 addEventListener('DOMContentLoaded', init);
 
-},{"./auth.js":"4f9sv","./api.js":"38UJz"}],"4f9sv":[function(require,module,exports,__globalThis) {
+},{"./auth":"4f9sv","./api":"38UJz"}],"4f9sv":[function(require,module,exports,__globalThis) {
+// src/auth.js
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
 parcelHelpers.export(exports, "userManager", ()=>userManager);
@@ -700,49 +709,54 @@ parcelHelpers.export(exports, "signIn", ()=>signIn);
 parcelHelpers.export(exports, "signOut", ()=>signOut);
 parcelHelpers.export(exports, "getUser", ()=>getUser);
 var _oidcClientTs = require("oidc-client-ts");
-const cognitoAuthConfig = {
-    authority: `https://cognito-idp.us-east-1.amazonaws.com/${"us-east-1_eiOcQ4DQl"}`,
+const HOSTED = "https://us-east-1eiocq4dql.auth.us-east-1.amazoncognito.com"; // e.g. https://<your-prefix>.auth.us-east-1.amazoncognito.com
+const ISSUER = `https://cognito-idp.us-east-1.amazonaws.com/${"us-east-1_eiOcQ4DQl"}`;
+// Hand the endpoints to the library so it won't fetch /.well-known/*
+const metadata = {
+    issuer: ISSUER,
+    authorization_endpoint: `${HOSTED}/oauth2/authorize`,
+    token_endpoint: `${HOSTED}/oauth2/token`,
+    userinfo_endpoint: `${HOSTED}/oauth2/userInfo`,
+    end_session_endpoint: `${HOSTED}/logout`,
+    jwks_uri: `${ISSUER}/.well-known/jwks.json`
+};
+const userManager = new (0, _oidcClientTs.UserManager)({
+    authority: ISSUER,
+    metadata,
     client_id: "1u4b7afs2o5f6dlth01evtkse9",
     redirect_uri: "http://localhost:1234",
     response_type: 'code',
-    scope: 'phone openid email',
+    scope: 'openid email phone',
     revokeTokenTypes: [
         'refresh_token'
     ],
     automaticSilentRenew: false
-};
-const userManager = new (0, _oidcClientTs.UserManager)({
-    ...cognitoAuthConfig
 });
 async function signIn() {
     await userManager.signinRedirect();
 }
 async function signOut() {
-    try {
-        // Clear the user from the UserManager first
-        await userManager.removeUser();
-    } catch (error) {
-        console.error('Error clearing local session:', error);
-    }
-    // For Cognito, construct the Hosted UI logout URL using env-configured domain
-    const region = "us-east-1_eiOcQ4DQl".split('_')[0] || 'us-east-1';
-    const domainPrefix = "https://us-east-1eiocq4dql.auth.us-east-1.amazoncognito.com";
-    if (!domainPrefix) {
-        console.error('Missing AWS_COGNITO_DOMAIN for logout');
-        return;
-    }
-    const logoutUrl = `https://${domainPrefix}.auth.${region}.amazoncognito.com/logout?client_id=${"1u4b7afs2o5f6dlth01evtkse9"}&logout_uri=${encodeURIComponent("http://localhost:1234")}`;
-    window.location.href = logoutUrl;
+    const user = await userManager.getUser();
+    // 1) Clear local stored user so UI flips immediately after return
+    await userManager.removeUser();
+    // 2) Hit Cognito's Hosted UI logout to clear its cookies (SSO)
+    await userManager.signoutRedirect({
+        // what oidc-client-ts sends by default; some IdPs use this
+        post_logout_redirect_uri: "http://localhost:1234",
+        id_token_hint: user?.id_token,
+        // Cognito expects these query params:
+        extraQueryParams: {
+            client_id: "1u4b7afs2o5f6dlth01evtkse9",
+            logout_uri: "http://localhost:1234"
+        }
+    });
 }
 function formatUser(user) {
-    console.log('User Authenticated', {
-        user
-    });
     return {
-        username: user.profile.preferred_username || user.profile.email,
-        email: user.profile.email,
-        idToken: user.id_token,
-        accessToken: user.access_token,
+        username: user?.profile?.['cognito:username'],
+        email: user?.profile?.email,
+        idToken: user?.id_token,
+        accessToken: user?.access_token,
         authorizationHeaders: (type = 'application/json')=>({
                 'Content-Type': type,
                 Authorization: `Bearer ${user.id_token}`
@@ -761,11 +775,9 @@ async function getUser() {
 
 },{"oidc-client-ts":"cAcxW","@parcel/transformer-js/src/esmodule-helpers.js":"jnFvT"}],"cAcxW":[function(require,module,exports,__globalThis) {
 "use strict";
-var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
-var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __export = (target, all)=>{
     for(var name in all)__defProp(target, name, {
@@ -782,25 +794,19 @@ var __copyProps = (to, from, except, desc)=>{
     }
     return to;
 };
-var __toESM = (mod, isNodeMode, target)=>(target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(// If the importer is in node compatibility mode or this is not an ESM
-    // file that has been converted to a CommonJS file using a Babel-
-    // compatible transform (i.e. "__esModule" has not been set), then set
-    // "default" to the CommonJS "module.exports" for node compatibility.
-    isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", {
-        value: mod,
-        enumerable: true
-    }) : target, mod));
 var __toCommonJS = (mod)=>__copyProps(__defProp({}, "__esModule", {
         value: true
     }), mod);
 // src/index.ts
-var src_exports = {};
-__export(src_exports, {
+var index_exports = {};
+__export(index_exports, {
     AccessTokenEvents: ()=>AccessTokenEvents,
     CheckSessionIFrame: ()=>CheckSessionIFrame,
+    DPoPState: ()=>DPoPState,
     ErrorResponse: ()=>ErrorResponse,
     ErrorTimeout: ()=>ErrorTimeout,
     InMemoryWebStorage: ()=>InMemoryWebStorage,
+    IndexedDbDPoPStore: ()=>IndexedDbDPoPStore,
     Log: ()=>Log,
     Logger: ()=>Logger,
     MetadataService: ()=>MetadataService,
@@ -817,12 +823,7 @@ __export(src_exports, {
     Version: ()=>Version,
     WebStorageStateStore: ()=>WebStorageStateStore
 });
-module.exports = __toCommonJS(src_exports);
-// src/utils/CryptoUtils.ts
-var import_core = __toESM(require("cd65f2846f9a9917"));
-var import_sha256 = __toESM(require("b081c80cbcca67d0"));
-var import_enc_base64 = __toESM(require("69a1441ed613820e"));
-var import_enc_utf8 = __toESM(require("46685f198d718556"));
+module.exports = __toCommonJS(index_exports);
 // src/utils/Logger.ts
 var nopLogger = {
     debug: ()=>void 0,
@@ -856,21 +857,21 @@ var Log = /* @__PURE__ */ ((Log2)=>{
     }
     Log2.setLogger = setLogger;
 })(Log || (Log = {}));
-var Logger = class {
+var Logger = class _Logger {
     constructor(_name){
         this._name = _name;
     }
     /* eslint-disable @typescript-eslint/no-unsafe-enum-comparison */ debug(...args) {
-        if (level >= 4 /* DEBUG */ ) logger.debug(Logger._format(this._name, this._method), ...args);
+        if (level >= 4 /* DEBUG */ ) logger.debug(_Logger._format(this._name, this._method), ...args);
     }
     info(...args) {
-        if (level >= 3 /* INFO */ ) logger.info(Logger._format(this._name, this._method), ...args);
+        if (level >= 3 /* INFO */ ) logger.info(_Logger._format(this._name, this._method), ...args);
     }
     warn(...args) {
-        if (level >= 2 /* WARN */ ) logger.warn(Logger._format(this._name, this._method), ...args);
+        if (level >= 2 /* WARN */ ) logger.warn(_Logger._format(this._name, this._method), ...args);
     }
     error(...args) {
-        if (level >= 1 /* ERROR */ ) logger.error(Logger._format(this._name, this._method), ...args);
+        if (level >= 1 /* ERROR */ ) logger.error(_Logger._format(this._name, this._method), ...args);
     }
     /* eslint-enable @typescript-eslint/no-unsafe-enum-comparison */ throw(err) {
         this.error(err);
@@ -883,7 +884,7 @@ var Logger = class {
         return methodLogger;
     }
     static createStatic(name, staticMethod) {
-        const staticLogger = new Logger(`${name}.${staticMethod}`);
+        const staticLogger = new _Logger(`${name}.${staticMethod}`);
         staticLogger.debug("begin");
         return staticLogger;
     }
@@ -893,42 +894,76 @@ var Logger = class {
     }
     /* eslint-disable @typescript-eslint/no-unsafe-enum-comparison */ // helpers for static class methods
     static debug(name, ...args) {
-        if (level >= 4 /* DEBUG */ ) logger.debug(Logger._format(name), ...args);
+        if (level >= 4 /* DEBUG */ ) logger.debug(_Logger._format(name), ...args);
     }
     static info(name, ...args) {
-        if (level >= 3 /* INFO */ ) logger.info(Logger._format(name), ...args);
+        if (level >= 3 /* INFO */ ) logger.info(_Logger._format(name), ...args);
     }
     static warn(name, ...args) {
-        if (level >= 2 /* WARN */ ) logger.warn(Logger._format(name), ...args);
+        if (level >= 2 /* WARN */ ) logger.warn(_Logger._format(name), ...args);
     }
     static error(name, ...args) {
-        if (level >= 1 /* ERROR */ ) logger.error(Logger._format(name), ...args);
+        if (level >= 1 /* ERROR */ ) logger.error(_Logger._format(name), ...args);
     }
 };
 Log.reset();
+// src/utils/JwtUtils.ts
+var import_jwt_decode = require("3455b80cc963b26");
+var JwtUtils = class {
+    // IMPORTANT: doesn't validate the token
+    static decode(token) {
+        try {
+            return (0, import_jwt_decode.jwtDecode)(token);
+        } catch (err) {
+            Logger.error("JwtUtils.decode", err);
+            throw err;
+        }
+    }
+    static async generateSignedJwt(header, payload, privateKey) {
+        const encodedHeader = CryptoUtils.encodeBase64Url(new TextEncoder().encode(JSON.stringify(header)));
+        const encodedPayload = CryptoUtils.encodeBase64Url(new TextEncoder().encode(JSON.stringify(payload)));
+        const encodedToken = `${encodedHeader}.${encodedPayload}`;
+        const signature = await window.crypto.subtle.sign({
+            name: "ECDSA",
+            hash: {
+                name: "SHA-256"
+            }
+        }, privateKey, new TextEncoder().encode(encodedToken));
+        const encodedSignature = CryptoUtils.encodeBase64Url(new Uint8Array(signature));
+        return `${encodedToken}.${encodedSignature}`;
+    }
+};
 // src/utils/CryptoUtils.ts
 var UUID_V4_TEMPLATE = "10000000-1000-4000-8000-100000000000";
-var CryptoUtils = class {
+var toBase64 = (val)=>btoa([
+        ...new Uint8Array(val)
+    ].map((chr)=>String.fromCharCode(chr)).join(""));
+var _CryptoUtils = class _CryptoUtils {
     static _randomWord() {
-        return import_core.default.lib.WordArray.random(1).words[0];
+        const arr = new Uint32Array(1);
+        crypto.getRandomValues(arr);
+        return arr[0];
     }
     /**
    * Generates RFC4122 version 4 guid
    */ static generateUUIDv4() {
-        const uuid = UUID_V4_TEMPLATE.replace(/[018]/g, (c)=>(+c ^ CryptoUtils._randomWord() & 15 >> +c / 4).toString(16));
+        const uuid = UUID_V4_TEMPLATE.replace(/[018]/g, (c)=>(+c ^ _CryptoUtils._randomWord() & 15 >> +c / 4).toString(16));
         return uuid.replace(/-/g, "");
     }
     /**
    * PKCE: Generate a code verifier
    */ static generateCodeVerifier() {
-        return CryptoUtils.generateUUIDv4() + CryptoUtils.generateUUIDv4() + CryptoUtils.generateUUIDv4();
+        return _CryptoUtils.generateUUIDv4() + _CryptoUtils.generateUUIDv4() + _CryptoUtils.generateUUIDv4();
     }
     /**
    * PKCE: Generate a code challenge
-   */ static generateCodeChallenge(code_verifier) {
+   */ static async generateCodeChallenge(code_verifier) {
+        if (!crypto.subtle) throw new Error("Crypto.subtle is available only in secure contexts (HTTPS).");
         try {
-            const hashed = (0, import_sha256.default)(code_verifier);
-            return import_enc_base64.default.stringify(hashed).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+            const encoder = new TextEncoder();
+            const data = encoder.encode(code_verifier);
+            const hashed = await crypto.subtle.digest("SHA-256", data);
+            return toBase64(hashed).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
         } catch (err) {
             Logger.error("CryptoUtils.generateCodeChallenge", err);
             throw err;
@@ -937,19 +972,126 @@ var CryptoUtils = class {
     /**
    * Generates a base64-encoded string for a basic auth header
    */ static generateBasicAuth(client_id, client_secret) {
-        const basicAuth = import_enc_utf8.default.parse([
+        const encoder = new TextEncoder();
+        const data = encoder.encode([
             client_id,
             client_secret
         ].join(":"));
-        return import_enc_base64.default.stringify(basicAuth);
+        return toBase64(data);
+    }
+    /**
+   * Generates a hash of a string using a given algorithm
+   * @param alg
+   * @param message
+   */ static async hash(alg, message) {
+        const msgUint8 = new TextEncoder().encode(message);
+        const hashBuffer = await crypto.subtle.digest(alg, msgUint8);
+        return new Uint8Array(hashBuffer);
+    }
+    /**
+   * Generates a rfc7638 compliant jwk thumbprint
+   * @param jwk
+   */ static async customCalculateJwkThumbprint(jwk) {
+        let jsonObject;
+        switch(jwk.kty){
+            case "RSA":
+                jsonObject = {
+                    "e": jwk.e,
+                    "kty": jwk.kty,
+                    "n": jwk.n
+                };
+                break;
+            case "EC":
+                jsonObject = {
+                    "crv": jwk.crv,
+                    "kty": jwk.kty,
+                    "x": jwk.x,
+                    "y": jwk.y
+                };
+                break;
+            case "OKP":
+                jsonObject = {
+                    "crv": jwk.crv,
+                    "kty": jwk.kty,
+                    "x": jwk.x
+                };
+                break;
+            case "oct":
+                jsonObject = {
+                    "crv": jwk.k,
+                    "kty": jwk.kty
+                };
+                break;
+            default:
+                throw new Error("Unknown jwk type");
+        }
+        const utf8encodedAndHashed = await _CryptoUtils.hash("SHA-256", JSON.stringify(jsonObject));
+        return _CryptoUtils.encodeBase64Url(utf8encodedAndHashed);
+    }
+    static async generateDPoPProof({ url, accessToken, httpMethod, keyPair, nonce }) {
+        let hashedToken;
+        let encodedHash;
+        const payload = {
+            "jti": window.crypto.randomUUID(),
+            "htm": httpMethod != null ? httpMethod : "GET",
+            "htu": url,
+            "iat": Math.floor(Date.now() / 1e3)
+        };
+        if (accessToken) {
+            hashedToken = await _CryptoUtils.hash("SHA-256", accessToken);
+            encodedHash = _CryptoUtils.encodeBase64Url(hashedToken);
+            payload.ath = encodedHash;
+        }
+        if (nonce) payload.nonce = nonce;
+        try {
+            const publicJwk = await crypto.subtle.exportKey("jwk", keyPair.publicKey);
+            const header = {
+                "alg": "ES256",
+                "typ": "dpop+jwt",
+                "jwk": {
+                    "crv": publicJwk.crv,
+                    "kty": publicJwk.kty,
+                    "x": publicJwk.x,
+                    "y": publicJwk.y
+                }
+            };
+            return await JwtUtils.generateSignedJwt(header, payload, keyPair.privateKey);
+        } catch (err) {
+            if (err instanceof TypeError) throw new Error(`Error exporting dpop public key: ${err.message}`);
+            else throw err;
+        }
+    }
+    static async generateDPoPJkt(keyPair) {
+        try {
+            const publicJwk = await crypto.subtle.exportKey("jwk", keyPair.publicKey);
+            return await _CryptoUtils.customCalculateJwkThumbprint(publicJwk);
+        } catch (err) {
+            if (err instanceof TypeError) throw new Error(`Could not retrieve dpop keys from storage: ${err.message}`);
+            else throw err;
+        }
+    }
+    static async generateDPoPKeys() {
+        return await window.crypto.subtle.generateKey({
+            name: "ECDSA",
+            namedCurve: "P-256"
+        }, false, [
+            "sign",
+            "verify"
+        ]);
     }
 };
+/**
+ * Generates a base64url encoded string
+ */ _CryptoUtils.encodeBase64Url = (input)=>{
+    return toBase64(input).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+};
+var CryptoUtils = _CryptoUtils;
 // src/utils/Event.ts
 var Event = class {
     constructor(_name){
         this._name = _name;
-        this._logger = new Logger(`Event('${this._name}')`);
         this._callbacks = [];
+        this._logger = new Logger(`Event('${this._name}')`);
     }
     addHandler(cb) {
         this._callbacks.push(cb);
@@ -959,22 +1101,9 @@ var Event = class {
         const idx = this._callbacks.lastIndexOf(cb);
         if (idx >= 0) this._callbacks.splice(idx, 1);
     }
-    raise(...ev) {
+    async raise(...ev) {
         this._logger.debug("raise:", ...ev);
-        for (const cb of this._callbacks)cb(...ev);
-    }
-};
-// src/utils/JwtUtils.ts
-var import_jwt_decode = __toESM(require("3455b80cc963b26"));
-var JwtUtils = class {
-    // IMPORTANT: doesn't validate the token
-    static decode(token) {
-        try {
-            return (0, import_jwt_decode.default)(token);
-        } catch (err) {
-            Logger.error("JwtUtils.decode", err);
-            throw err;
-        }
+        for (const cb of this._callbacks)await cb(...ev);
     }
 };
 // src/utils/PopupUtils.ts
@@ -1000,16 +1129,16 @@ var PopupUtils = class {
     }
 };
 // src/utils/Timer.ts
-var Timer = class extends Event {
+var Timer = class _Timer extends Event {
     constructor(){
         super(...arguments);
         this._logger = new Logger(`Timer('${this._name}')`);
         this._timerHandle = null;
         this._expiration = 0;
         this._callback = ()=>{
-            const diff = this._expiration - Timer.getEpochTime();
+            const diff = this._expiration - _Timer.getEpochTime();
             this._logger.debug("timer completes in", diff);
-            if (this._expiration <= Timer.getEpochTime()) {
+            if (this._expiration <= _Timer.getEpochTime()) {
                 this.cancel();
                 super.raise();
             }
@@ -1022,7 +1151,7 @@ var Timer = class extends Event {
     init(durationInSeconds) {
         const logger2 = this._logger.create("init");
         durationInSeconds = Math.max(Math.floor(durationInSeconds), 1);
-        const expiration = Timer.getEpochTime() + durationInSeconds;
+        const expiration = _Timer.getEpochTime() + durationInSeconds;
         if (this.expiration === expiration && this._timerHandle) {
             logger2.debug("skipping since already initialized for expiration at", this.expiration);
             return;
@@ -1088,7 +1217,7 @@ var AccessTokenEvents = class {
         this._expiredTimer = new Timer("Access token expired");
         this._expiringNotificationTimeInSeconds = args.expiringNotificationTimeInSeconds;
     }
-    load(container) {
+    async load(container) {
         const logger2 = this._logger.create("load");
         if (container.access_token && container.expires_in !== void 0) {
             const duration = container.expires_in;
@@ -1110,7 +1239,7 @@ var AccessTokenEvents = class {
             this._expiredTimer.cancel();
         }
     }
-    unload() {
+    async unload() {
         this._logger.debug("unload: canceling existing access token timers");
         this._expiringTimer.cancel();
         this._expiredTimer.cancel();
@@ -1228,6 +1357,14 @@ var InMemoryWebStorage = class {
         return Object.getOwnPropertyNames(this._data)[index];
     }
 };
+// src/errors/ErrorDPoPNonce.ts
+var ErrorDPoPNonce = class extends Error {
+    constructor(nonce, message){
+        super(message);
+        /** Marker to detect class: "ErrorDPoPNonce" */ this.name = "ErrorDPoPNonce";
+        this.nonce = nonce;
+    }
+};
 // src/JsonService.ts
 var JsonService = class {
     constructor(additionalContentTypes = [], _jwtHandler = null, _extraHeaders = {}){
@@ -1256,7 +1393,7 @@ var JsonService = class {
             clearTimeout(timeoutId);
         }
     }
-    async getJson(url, { token, credentials } = {}) {
+    async getJson(url, { token, credentials, timeoutInSeconds } = {}) {
         const logger2 = this._logger.create("getJson");
         const headers = {
             "Accept": this._contentTypes.join(", ")
@@ -1265,13 +1402,14 @@ var JsonService = class {
             logger2.debug("token passed, setting Authorization header");
             headers["Authorization"] = "Bearer " + token;
         }
-        this.appendExtraHeaders(headers);
+        this._appendExtraHeaders(headers);
         let response;
         try {
             logger2.debug("url:", url);
             response = await this.fetchWithTimeout(url, {
                 method: "GET",
                 headers,
+                timeoutInSeconds,
                 credentials
             });
         } catch (err) {
@@ -1297,14 +1435,15 @@ var JsonService = class {
         }
         return json;
     }
-    async postForm(url, { body, basicAuth, timeoutInSeconds, initCredentials }) {
+    async postForm(url, { body, basicAuth, timeoutInSeconds, initCredentials, extraHeaders }) {
         const logger2 = this._logger.create("postForm");
         const headers = {
             "Accept": this._contentTypes.join(", "),
-            "Content-Type": "application/x-www-form-urlencoded"
+            "Content-Type": "application/x-www-form-urlencoded",
+            ...extraHeaders
         };
         if (basicAuth !== void 0) headers["Authorization"] = "Basic " + basicAuth;
-        this.appendExtraHeaders(headers);
+        this._appendExtraHeaders(headers);
         let response;
         try {
             logger2.debug("url:", url);
@@ -1333,23 +1472,33 @@ var JsonService = class {
         }
         if (!response.ok) {
             logger2.error("Error from server:", json);
+            if (response.headers.has("dpop-nonce")) {
+                const nonce = response.headers.get("dpop-nonce");
+                throw new ErrorDPoPNonce(nonce, `${JSON.stringify(json)}`);
+            }
             if (json.error) throw new ErrorResponse(json, body);
             throw new Error(`${response.statusText} (${response.status}): ${JSON.stringify(json)}`);
         }
         return json;
     }
-    appendExtraHeaders(headers) {
+    _appendExtraHeaders(headers) {
         const logger2 = this._logger.create("appendExtraHeaders");
         const customKeys = Object.keys(this._extraHeaders);
         const protectedHeaders = [
-            "authorization",
             "accept",
             "content-type"
+        ];
+        const preventOverride = [
+            "authorization"
         ];
         if (customKeys.length === 0) return;
         customKeys.forEach((headerName)=>{
             if (protectedHeaders.includes(headerName.toLocaleLowerCase())) {
-                logger2.warn("Protected header could not be overridden", headerName, protectedHeaders);
+                logger2.warn("Protected header could not be set", headerName, protectedHeaders);
+                return;
+            }
+            if (preventOverride.includes(headerName.toLocaleLowerCase()) && Object.keys(headers).includes(headerName)) {
+                logger2.warn("Header could not be overridden", headerName, preventOverride);
                 return;
             }
             const content = typeof this._extraHeaders[headerName] === "function" ? this._extraHeaders[headerName]() : this._extraHeaders[headerName];
@@ -1396,10 +1545,11 @@ var MetadataService = class {
         }
         logger2.debug("getting metadata from", this._metadataUrl);
         const metadata = await this._jsonService.getJson(this._metadataUrl, {
-            credentials: this._fetchRequestCredentials
+            credentials: this._fetchRequestCredentials,
+            timeoutInSeconds: this._settings.requestTimeoutInSeconds
         });
         logger2.debug("merging remote JSON with seed metadata");
-        this._metadata = Object.assign({}, this._settings.metadataSeed, metadata);
+        this._metadata = Object.assign({}, metadata, this._settings.metadataSeed);
         return this._metadata;
     }
     getIssuer() {
@@ -1447,7 +1597,9 @@ var MetadataService = class {
         }
         const jwks_uri = await this.getKeysEndpoint(false);
         logger2.debug("got jwks_uri", jwks_uri);
-        const keySet = await this._jsonService.getJson(jwks_uri);
+        const keySet = await this._jsonService.getJson(jwks_uri, {
+            timeoutInSeconds: this._settings.requestTimeoutInSeconds
+        });
         logger2.debug("got key set", keySet);
         if (!Array.isArray(keySet.keys)) {
             logger2.throw(new Error("Missing keys on keyset"));
@@ -1497,17 +1649,18 @@ var WebStorageStateStore = class {
 var DefaultResponseType = "code";
 var DefaultScope = "openid";
 var DefaultClientAuthentication = "client_secret_post";
-var DefaultResponseMode = "query";
 var DefaultStaleStateAgeInSeconds = 900;
-var DefaultClockSkewInSeconds = 300;
 var OidcClientSettingsStore = class {
     constructor({ // metadata related
     authority, metadataUrl, metadata, signingKeys, metadataSeed, // client related
     client_id, client_secret, response_type = DefaultResponseType, scope = DefaultScope, redirect_uri, post_logout_redirect_uri, client_authentication = DefaultClientAuthentication, // optional protocol
-    prompt, display, max_age, ui_locales, acr_values, resource, response_mode = DefaultResponseMode, // behavior flags
-    filterProtocolClaims = true, loadUserInfo = false, staleStateAgeInSeconds = DefaultStaleStateAgeInSeconds, clockSkewInSeconds = DefaultClockSkewInSeconds, userInfoJwtIssuer = "OP", mergeClaims = false, disablePKCE = false, // other behavior
-    stateStore, refreshTokenCredentials, revokeTokenAdditionalContentTypes, fetchRequestCredentials, refreshTokenAllowedScope, // extra
-    extraQueryParams = {}, extraTokenParams = {}, extraHeaders = {} }){
+    prompt, display, max_age, ui_locales, acr_values, resource, response_mode, // behavior flags
+    filterProtocolClaims = true, loadUserInfo = false, requestTimeoutInSeconds, staleStateAgeInSeconds = DefaultStaleStateAgeInSeconds, mergeClaimsStrategy = {
+        array: "replace"
+    }, disablePKCE = false, // other behavior
+    stateStore, revokeTokenAdditionalContentTypes, fetchRequestCredentials, refreshTokenAllowedScope, // extra
+    extraQueryParams = {}, extraTokenParams = {}, extraHeaders = {}, dpop, omitScopeWhenRequesting = false }){
+        var _a;
         this.authority = authority;
         if (metadataUrl) this.metadataUrl = metadataUrl;
         else {
@@ -1537,13 +1690,12 @@ var OidcClientSettingsStore = class {
         this.filterProtocolClaims = filterProtocolClaims != null ? filterProtocolClaims : true;
         this.loadUserInfo = !!loadUserInfo;
         this.staleStateAgeInSeconds = staleStateAgeInSeconds;
-        this.clockSkewInSeconds = clockSkewInSeconds;
-        this.userInfoJwtIssuer = userInfoJwtIssuer;
-        this.mergeClaims = !!mergeClaims;
+        this.mergeClaimsStrategy = mergeClaimsStrategy;
+        this.omitScopeWhenRequesting = omitScopeWhenRequesting;
         this.disablePKCE = !!disablePKCE;
         this.revokeTokenAdditionalContentTypes = revokeTokenAdditionalContentTypes;
-        if (fetchRequestCredentials && refreshTokenCredentials) console.warn("Both fetchRequestCredentials and refreshTokenCredentials is set. Only fetchRequestCredentials will be used.");
-        this.fetchRequestCredentials = fetchRequestCredentials ? fetchRequestCredentials : refreshTokenCredentials ? refreshTokenCredentials : "same-origin";
+        this.fetchRequestCredentials = fetchRequestCredentials ? fetchRequestCredentials : "same-origin";
+        this.requestTimeoutInSeconds = requestTimeoutInSeconds;
         if (stateStore) this.stateStore = stateStore;
         else {
             const store = typeof window !== "undefined" ? window.localStorage : new InMemoryWebStorage();
@@ -1555,6 +1707,8 @@ var OidcClientSettingsStore = class {
         this.extraQueryParams = extraQueryParams;
         this.extraTokenParams = extraTokenParams;
         this.extraHeaders = extraHeaders;
+        this.dpop = dpop;
+        if (this.dpop && !((_a = this.dpop) == null ? void 0 : _a.store)) throw new Error("A DPoPStore is required when dpop is enabled");
     }
 };
 // src/UserInfoService.ts
@@ -1583,7 +1737,8 @@ var UserInfoService = class {
         logger2.debug("got userinfo url", url);
         const claims = await this._jsonService.getJson(url, {
             token,
-            credentials: this._settings.fetchRequestCredentials
+            credentials: this._settings.fetchRequestCredentials,
+            timeoutInSeconds: this._settings.requestTimeoutInSeconds
         });
         logger2.debug("got claims", claims);
         return claims;
@@ -1601,7 +1756,7 @@ var TokenClient = class {
    * Exchange code.
    *
    * @see https://www.rfc-editor.org/rfc/rfc6749#section-4.1.3
-   */ async exchangeCode({ grant_type = "authorization_code", redirect_uri = this._settings.redirect_uri, client_id = this._settings.client_id, client_secret = this._settings.client_secret, ...args }) {
+   */ async exchangeCode({ grant_type = "authorization_code", redirect_uri = this._settings.redirect_uri, client_id = this._settings.client_id, client_secret = this._settings.client_secret, extraHeaders, ...args }) {
         const logger2 = this._logger.create("exchangeCode");
         if (!client_id) logger2.throw(new Error("A client_id is required"));
         if (!redirect_uri) logger2.throw(new Error("A redirect_uri is required"));
@@ -1614,7 +1769,7 @@ var TokenClient = class {
         let basicAuth;
         switch(this._settings.client_authentication){
             case "client_secret_basic":
-                if (!client_secret) {
+                if (client_secret === void 0 || client_secret === null) {
                     logger2.throw(new Error("A client_secret is required"));
                     throw null;
                 }
@@ -1630,7 +1785,9 @@ var TokenClient = class {
         const response = await this._jsonService.postForm(url, {
             body: params,
             basicAuth,
-            initCredentials: this._settings.fetchRequestCredentials
+            timeoutInSeconds: this._settings.requestTimeoutInSeconds,
+            initCredentials: this._settings.fetchRequestCredentials,
+            extraHeaders
         });
         logger2.debug("got response");
         return response;
@@ -1643,14 +1800,14 @@ var TokenClient = class {
         const logger2 = this._logger.create("exchangeCredentials");
         if (!client_id) logger2.throw(new Error("A client_id is required"));
         const params = new URLSearchParams({
-            grant_type,
-            scope
+            grant_type
         });
+        if (!this._settings.omitScopeWhenRequesting) params.set("scope", scope);
         for (const [key, value] of Object.entries(args))if (value != null) params.set(key, value);
         let basicAuth;
         switch(this._settings.client_authentication){
             case "client_secret_basic":
-                if (!client_secret) {
+                if (client_secret === void 0 || client_secret === null) {
                     logger2.throw(new Error("A client_secret is required"));
                     throw null;
                 }
@@ -1666,6 +1823,7 @@ var TokenClient = class {
         const response = await this._jsonService.postForm(url, {
             body: params,
             basicAuth,
+            timeoutInSeconds: this._settings.requestTimeoutInSeconds,
             initCredentials: this._settings.fetchRequestCredentials
         });
         logger2.debug("got response");
@@ -1675,7 +1833,7 @@ var TokenClient = class {
    * Exchange a refresh token.
    *
    * @see https://www.rfc-editor.org/rfc/rfc6749#section-6
-   */ async exchangeRefreshToken({ grant_type = "refresh_token", client_id = this._settings.client_id, client_secret = this._settings.client_secret, timeoutInSeconds, ...args }) {
+   */ async exchangeRefreshToken({ grant_type = "refresh_token", client_id = this._settings.client_id, client_secret = this._settings.client_secret, timeoutInSeconds, extraHeaders, ...args }) {
         const logger2 = this._logger.create("exchangeRefreshToken");
         if (!client_id) logger2.throw(new Error("A client_id is required"));
         if (!args.refresh_token) logger2.throw(new Error("A refresh_token is required"));
@@ -1689,7 +1847,7 @@ var TokenClient = class {
         let basicAuth;
         switch(this._settings.client_authentication){
             case "client_secret_basic":
-                if (!client_secret) {
+                if (client_secret === void 0 || client_secret === null) {
                     logger2.throw(new Error("A client_secret is required"));
                     throw null;
                 }
@@ -1706,7 +1864,8 @@ var TokenClient = class {
             body: params,
             basicAuth,
             timeoutInSeconds,
-            initCredentials: this._settings.fetchRequestCredentials
+            initCredentials: this._settings.fetchRequestCredentials,
+            extraHeaders
         });
         logger2.debug("got response");
         return response;
@@ -1726,7 +1885,8 @@ var TokenClient = class {
         params.set("client_id", this._settings.client_id);
         if (this._settings.client_secret) params.set("client_secret", this._settings.client_secret);
         await this._jsonService.postForm(url, {
-            body: params
+            body: params,
+            timeoutInSeconds: this._settings.requestTimeoutInSeconds
         });
         logger2.debug("got response");
     }
@@ -1741,11 +1901,11 @@ var ResponseValidator = class {
         this._userInfoService = new UserInfoService(this._settings, this._metadataService);
         this._tokenClient = new TokenClient(this._settings, this._metadataService);
     }
-    async validateSigninResponse(response, state) {
+    async validateSigninResponse(response, state, extraHeaders) {
         const logger2 = this._logger.create("validateSigninResponse");
         this._processSigninState(response, state);
         logger2.debug("state processed");
-        await this._processCode(response, state);
+        await this._processCode(response, state, extraHeaders);
         logger2.debug("code processed");
         if (response.isOpenId) this._validateIdTokenAttributes(response);
         logger2.debug("tokens validated");
@@ -1754,9 +1914,10 @@ var ResponseValidator = class {
     }
     async validateCredentialsResponse(response, skipUserInfo) {
         const logger2 = this._logger.create("validateCredentialsResponse");
-        if (response.isOpenId && !!response.id_token) this._validateIdTokenAttributes(response);
+        const shouldValidateSubClaim = response.isOpenId && !!response.id_token;
+        if (shouldValidateSubClaim) this._validateIdTokenAttributes(response);
         logger2.debug("tokens validated");
-        await this._processClaims(response, skipUserInfo, response.isOpenId);
+        await this._processClaims(response, skipUserInfo, shouldValidateSubClaim);
         logger2.debug("claims processed");
     }
     async validateRefreshResponse(response, state) {
@@ -1819,7 +1980,7 @@ var ResponseValidator = class {
         response.profile = this._claimsService.mergeClaims(response.profile, this._claimsService.filterProtocolClaims(claims));
         logger2.debug("user info claims received, updated profile:", response.profile);
     }
-    async _processCode(response, state) {
+    async _processCode(response, state, extraHeaders) {
         const logger2 = this._logger.create("_processCode");
         if (response.code) {
             logger2.debug("Validating code");
@@ -1829,6 +1990,7 @@ var ResponseValidator = class {
                 code: response.code,
                 redirect_uri: state.redirect_uri,
                 code_verifier: state.code_verifier,
+                extraHeaders,
                 ...state.extraTokenParams
             });
             Object.assign(response, tokenResponse);
@@ -1851,7 +2013,7 @@ var ResponseValidator = class {
     }
 };
 // src/State.ts
-var State = class {
+var State = class _State {
     constructor(args){
         this.id = args.id || CryptoUtils.generateUUIDv4();
         this.data = args.data;
@@ -1872,7 +2034,7 @@ var State = class {
     }
     static fromStorageString(storageString) {
         Logger.createStatic("State", "fromStorageString");
-        return new State(JSON.parse(storageString));
+        return Promise.resolve(new _State(JSON.parse(storageString)));
     }
     static async clearStaleState(storage, age) {
         const logger2 = Logger.createStatic("State", "clearStaleState");
@@ -1884,7 +2046,7 @@ var State = class {
             const item = await storage.get(key);
             let remove = false;
             if (item) try {
-                const state = State.fromStorageString(item);
+                const state = await _State.fromStorageString(item);
                 logger2.debug("got item from key:", key, state.created);
                 if (state.created <= cutoff) remove = true;
             } catch (err) {
@@ -1903,12 +2065,11 @@ var State = class {
     }
 };
 // src/SigninState.ts
-var SigninState = class extends State {
+var SigninState = class _SigninState extends State {
     constructor(args){
         super(args);
-        if (args.code_verifier === true) this.code_verifier = CryptoUtils.generateCodeVerifier();
-        else if (args.code_verifier) this.code_verifier = args.code_verifier;
-        if (this.code_verifier) this.code_challenge = CryptoUtils.generateCodeChallenge(this.code_verifier);
+        this.code_verifier = args.code_verifier;
+        this.code_challenge = args.code_challenge;
         this.authority = args.authority;
         this.client_id = args.client_id;
         this.redirect_uri = args.redirect_uri;
@@ -1917,6 +2078,15 @@ var SigninState = class extends State {
         this.extraTokenParams = args.extraTokenParams;
         this.response_mode = args.response_mode;
         this.skipUserInfo = args.skipUserInfo;
+    }
+    static async create(args) {
+        const code_verifier = args.code_verifier === true ? CryptoUtils.generateCodeVerifier() : args.code_verifier || void 0;
+        const code_challenge = code_verifier ? await CryptoUtils.generateCodeChallenge(code_verifier) : void 0;
+        return new _SigninState({
+            ...args,
+            code_verifier,
+            code_challenge
+        });
     }
     toStorageString() {
         new Logger("SigninState").create("toStorageString");
@@ -1940,40 +2110,43 @@ var SigninState = class extends State {
     static fromStorageString(storageString) {
         Logger.createStatic("SigninState", "fromStorageString");
         const data = JSON.parse(storageString);
-        return new SigninState(data);
+        return _SigninState.create(data);
     }
 };
 // src/SigninRequest.ts
-var SigninRequest = class {
-    constructor({ // mandatory
+var _SigninRequest = class _SigninRequest {
+    constructor(args){
+        this.url = args.url;
+        this.state = args.state;
+    }
+    static async create({ // mandatory
     url, authority, client_id, redirect_uri, response_type, scope, // optional
-    state_data, response_mode, request_type, client_secret, nonce, url_state, resource, skipUserInfo, extraQueryParams, extraTokenParams, disablePKCE, ...optionalParams }){
-        this._logger = new Logger("SigninRequest");
+    state_data, response_mode, request_type, client_secret, nonce, url_state, resource, skipUserInfo, extraQueryParams, extraTokenParams, disablePKCE, dpopJkt, omitScopeWhenRequesting, ...optionalParams }) {
         if (!url) {
-            this._logger.error("ctor: No url passed");
+            this._logger.error("create: No url passed");
             throw new Error("url");
         }
         if (!client_id) {
-            this._logger.error("ctor: No client_id passed");
+            this._logger.error("create: No client_id passed");
             throw new Error("client_id");
         }
         if (!redirect_uri) {
-            this._logger.error("ctor: No redirect_uri passed");
+            this._logger.error("create: No redirect_uri passed");
             throw new Error("redirect_uri");
         }
         if (!response_type) {
-            this._logger.error("ctor: No response_type passed");
+            this._logger.error("create: No response_type passed");
             throw new Error("response_type");
         }
         if (!scope) {
-            this._logger.error("ctor: No scope passed");
+            this._logger.error("create: No scope passed");
             throw new Error("scope");
         }
         if (!authority) {
-            this._logger.error("ctor: No authority passed");
+            this._logger.error("create: No authority passed");
             throw new Error("authority");
         }
-        this.state = new SigninState({
+        const state = await SigninState.create({
             data: state_data,
             request_type,
             url_state,
@@ -1991,13 +2164,14 @@ var SigninRequest = class {
         parsedUrl.searchParams.append("client_id", client_id);
         parsedUrl.searchParams.append("redirect_uri", redirect_uri);
         parsedUrl.searchParams.append("response_type", response_type);
-        parsedUrl.searchParams.append("scope", scope);
+        if (!omitScopeWhenRequesting) parsedUrl.searchParams.append("scope", scope);
         if (nonce) parsedUrl.searchParams.append("nonce", nonce);
-        let state = this.state.id;
-        if (url_state) state = `${state}${URL_STATE_DELIMITER}${url_state}`;
-        parsedUrl.searchParams.append("state", state);
-        if (this.state.code_challenge) {
-            parsedUrl.searchParams.append("code_challenge", this.state.code_challenge);
+        if (dpopJkt) parsedUrl.searchParams.append("dpop_jkt", dpopJkt);
+        let stateParam = state.id;
+        if (url_state) stateParam = `${stateParam}${URL_STATE_DELIMITER}${url_state}`;
+        parsedUrl.searchParams.append("state", stateParam);
+        if (state.code_challenge) {
+            parsedUrl.searchParams.append("code_challenge", state.code_challenge);
             parsedUrl.searchParams.append("code_challenge_method", "S256");
         }
         if (resource) {
@@ -2011,9 +2185,14 @@ var SigninRequest = class {
             ...optionalParams,
             ...extraQueryParams
         }))if (value != null) parsedUrl.searchParams.append(key, value.toString());
-        this.url = parsedUrl.href;
+        return new _SigninRequest({
+            url: parsedUrl.href,
+            state
+        });
     }
 };
+_SigninRequest._logger = new Logger("SigninRequest");
+var SigninRequest = _SigninRequest;
 // src/SigninResponse.ts
 var OidcScope = "openid";
 var SigninResponse = class {
@@ -2048,7 +2227,7 @@ var SigninResponse = class {
 };
 // src/SignoutRequest.ts
 var SignoutRequest = class {
-    constructor({ url, state_data, id_token_hint, post_logout_redirect_uri, extraQueryParams, request_type, client_id }){
+    constructor({ url, state_data, id_token_hint, post_logout_redirect_uri, extraQueryParams, request_type, client_id, url_state }){
         this._logger = new Logger("SignoutRequest");
         if (!url) {
             this._logger.error("ctor: No url passed");
@@ -2059,12 +2238,15 @@ var SignoutRequest = class {
         if (client_id) parsedUrl.searchParams.append("client_id", client_id);
         if (post_logout_redirect_uri) {
             parsedUrl.searchParams.append("post_logout_redirect_uri", post_logout_redirect_uri);
-            if (state_data) {
+            if (state_data || url_state) {
                 this.state = new State({
                     data: state_data,
-                    request_type
+                    request_type,
+                    url_state
                 });
-                parsedUrl.searchParams.append("state", this.state.id);
+                let stateParam = this.state.id;
+                if (url_state) stateParam = `${stateParam}${URL_STATE_DELIMITER}${url_state}`;
+                parsedUrl.searchParams.append("state", stateParam);
             }
         }
         for (const [key, value] of Object.entries({
@@ -2077,6 +2259,11 @@ var SignoutRequest = class {
 var SignoutResponse = class {
     constructor(params){
         this.state = params.get("state");
+        if (this.state) {
+            const splitState = decodeURIComponent(this.state).split(URL_STATE_DELIMITER);
+            this.state = splitState[0];
+            if (splitState.length > 1) this.url_state = splitState.slice(1).join(URL_STATE_DELIMITER);
+        }
         this.error = params.get("error");
         this.error_description = params.get("error_description");
         this.error_uri = params.get("error_uri");
@@ -2121,22 +2308,29 @@ var ClaimsService = class {
         const result = {
             ...claims1
         };
-        for (const [claim, values] of Object.entries(claims2))for (const value of Array.isArray(values) ? values : [
-            values
-        ]){
-            const previousValue = result[claim];
-            if (previousValue === void 0) result[claim] = value;
-            else if (Array.isArray(previousValue)) {
-                if (!previousValue.includes(value)) previousValue.push(value);
-            } else if (result[claim] !== value) {
-                if (typeof value === "object" && this._settings.mergeClaims) result[claim] = this.mergeClaims(previousValue, value);
-                else result[claim] = [
-                    previousValue,
-                    value
-                ];
-            }
+        for (const [claim, values] of Object.entries(claims2))if (result[claim] !== values) {
+            if (Array.isArray(result[claim]) || Array.isArray(values)) {
+                if (this._settings.mergeClaimsStrategy.array == "replace") result[claim] = values;
+                else {
+                    const mergedValues = Array.isArray(result[claim]) ? result[claim] : [
+                        result[claim]
+                    ];
+                    for (const value of Array.isArray(values) ? values : [
+                        values
+                    ])if (!mergedValues.includes(value)) mergedValues.push(value);
+                    result[claim] = mergedValues;
+                }
+            } else if (typeof result[claim] === "object" && typeof values === "object") result[claim] = this.mergeClaims(result[claim], values);
+            else result[claim] = values;
         }
         return result;
+    }
+};
+// src/DPoPStore.ts
+var DPoPState = class {
+    constructor(keys, nonce){
+        this.keys = keys;
+        this.nonce = nonce;
     }
 };
 // src/OidcClient.ts
@@ -2149,12 +2343,12 @@ var OidcClient = class {
         this._validator = new ResponseValidator(this.settings, this.metadataService, this._claimsService);
         this._tokenClient = new TokenClient(this.settings, this.metadataService);
     }
-    async createSigninRequest({ state, request, request_uri, request_type, id_token_hint, login_hint, skipUserInfo, nonce, url_state, response_type = this.settings.response_type, scope = this.settings.scope, redirect_uri = this.settings.redirect_uri, prompt = this.settings.prompt, display = this.settings.display, max_age = this.settings.max_age, ui_locales = this.settings.ui_locales, acr_values = this.settings.acr_values, resource = this.settings.resource, response_mode = this.settings.response_mode, extraQueryParams = this.settings.extraQueryParams, extraTokenParams = this.settings.extraTokenParams }) {
+    async createSigninRequest({ state, request, request_uri, request_type, id_token_hint, login_hint, skipUserInfo, nonce, url_state, response_type = this.settings.response_type, scope = this.settings.scope, redirect_uri = this.settings.redirect_uri, prompt = this.settings.prompt, display = this.settings.display, max_age = this.settings.max_age, ui_locales = this.settings.ui_locales, acr_values = this.settings.acr_values, resource = this.settings.resource, response_mode = this.settings.response_mode, extraQueryParams = this.settings.extraQueryParams, extraTokenParams = this.settings.extraTokenParams, dpopJkt, omitScopeWhenRequesting = this.settings.omitScopeWhenRequesting }) {
         const logger2 = this._logger.create("createSigninRequest");
         if (response_type !== "code") throw new Error("Only the Authorization Code flow (with PKCE) is supported");
         const url = await this.metadataService.getAuthorizationEndpoint();
         logger2.debug("Received authorization endpoint", url);
-        const signinRequest = new SigninRequest({
+        const signinRequest = await SigninRequest.create({
             url,
             authority: this.settings.authority,
             client_id: this.settings.client_id,
@@ -2170,6 +2364,7 @@ var OidcClient = class {
             id_token_hint,
             login_hint,
             acr_values,
+            dpopJkt,
             resource,
             request,
             request_uri,
@@ -2180,7 +2375,8 @@ var OidcClient = class {
             client_secret: this.settings.client_secret,
             skipUserInfo,
             nonce,
-            disablePKCE: this.settings.disablePKCE
+            disablePKCE: this.settings.disablePKCE,
+            omitScopeWhenRequesting
         });
         await this.clearStaleState();
         const signinState = signinRequest.state;
@@ -2199,18 +2395,54 @@ var OidcClient = class {
             logger2.throw(new Error("No matching state found in storage"));
             throw null;
         }
-        const state = SigninState.fromStorageString(storedStateString);
+        const state = await SigninState.fromStorageString(storedStateString);
         return {
             state,
             response
         };
     }
-    async processSigninResponse(url) {
+    async processSigninResponse(url, extraHeaders, removeState = true) {
         const logger2 = this._logger.create("processSigninResponse");
-        const { state, response } = await this.readSigninResponseState(url, true);
+        const { state, response } = await this.readSigninResponseState(url, removeState);
         logger2.debug("received state from storage; validating response");
-        await this._validator.validateSigninResponse(response, state);
+        if (this.settings.dpop && this.settings.dpop.store) {
+            const dpopProof = await this.getDpopProof(this.settings.dpop.store);
+            extraHeaders = {
+                ...extraHeaders,
+                "DPoP": dpopProof
+            };
+        }
+        try {
+            await this._validator.validateSigninResponse(response, state, extraHeaders);
+        } catch (err) {
+            if (err instanceof ErrorDPoPNonce && this.settings.dpop) {
+                const dpopProof = await this.getDpopProof(this.settings.dpop.store, err.nonce);
+                extraHeaders["DPoP"] = dpopProof;
+                await this._validator.validateSigninResponse(response, state, extraHeaders);
+            } else throw err;
+        }
         return response;
+    }
+    async getDpopProof(dpopStore, nonce) {
+        let keyPair;
+        let dpopState;
+        if (!(await dpopStore.getAllKeys()).includes(this.settings.client_id)) {
+            keyPair = await CryptoUtils.generateDPoPKeys();
+            dpopState = new DPoPState(keyPair, nonce);
+            await dpopStore.set(this.settings.client_id, dpopState);
+        } else {
+            dpopState = await dpopStore.get(this.settings.client_id);
+            if (dpopState.nonce !== nonce && nonce) {
+                dpopState.nonce = nonce;
+                await dpopStore.set(this.settings.client_id, dpopState);
+            }
+        }
+        return await CryptoUtils.generateDPoPProof({
+            url: await this.metadataService.getTokenEndpoint(false),
+            httpMethod: "POST",
+            keyPair: dpopState.keys,
+            nonce: dpopState.nonce
+        });
     }
     async processResourceOwnerPasswordCredentials({ username, password, skipUserInfo = false, extraTokenParams = {} }) {
         const tokenResponse = await this._tokenClient.exchangeCredentials({
@@ -2223,7 +2455,7 @@ var OidcClient = class {
         await this._validator.validateCredentialsResponse(signinResponse, skipUserInfo);
         return signinResponse;
     }
-    async useRefreshToken({ state, timeoutInSeconds }) {
+    async useRefreshToken({ state, redirect_uri, resource, timeoutInSeconds, extraHeaders, extraTokenParams }) {
         var _a;
         const logger2 = this._logger.create("useRefreshToken");
         let scope;
@@ -2233,25 +2465,52 @@ var OidcClient = class {
             const providedScopes = ((_a = state.scope) == null ? void 0 : _a.split(" ")) || [];
             scope = providedScopes.filter((s)=>allowableScopes.includes(s)).join(" ");
         }
-        const result = await this._tokenClient.exchangeRefreshToken({
-            refresh_token: state.refresh_token,
-            resource: state.resource,
-            // provide the (possible filtered) scope list
-            scope,
-            timeoutInSeconds
-        });
+        if (this.settings.dpop && this.settings.dpop.store) {
+            const dpopProof = await this.getDpopProof(this.settings.dpop.store);
+            extraHeaders = {
+                ...extraHeaders,
+                "DPoP": dpopProof
+            };
+        }
+        let result;
+        try {
+            result = await this._tokenClient.exchangeRefreshToken({
+                refresh_token: state.refresh_token,
+                // provide the (possible filtered) scope list
+                scope,
+                redirect_uri,
+                resource,
+                timeoutInSeconds,
+                extraHeaders,
+                ...extraTokenParams
+            });
+        } catch (err) {
+            if (err instanceof ErrorDPoPNonce && this.settings.dpop) {
+                extraHeaders["DPoP"] = await this.getDpopProof(this.settings.dpop.store, err.nonce);
+                result = await this._tokenClient.exchangeRefreshToken({
+                    refresh_token: state.refresh_token,
+                    // provide the (possible filtered) scope list
+                    scope,
+                    redirect_uri,
+                    resource,
+                    timeoutInSeconds,
+                    extraHeaders,
+                    ...extraTokenParams
+                });
+            } else throw err;
+        }
         const response = new SigninResponse(new URLSearchParams());
         Object.assign(response, result);
         logger2.debug("validating response", response);
         await this._validator.validateRefreshResponse(response, {
             ...state,
-            // overide the scope in the state handed over to the validator
+            // override the scope in the state handed over to the validator
             // so it can set the granted scope to the requested scope in case none is included in the response
             scope
         });
         return response;
     }
-    async createSignoutRequest({ state, id_token_hint, client_id, request_type, post_logout_redirect_uri = this.settings.post_logout_redirect_uri, extraQueryParams = this.settings.extraQueryParams } = {}) {
+    async createSignoutRequest({ state, id_token_hint, client_id, request_type, url_state, post_logout_redirect_uri = this.settings.post_logout_redirect_uri, extraQueryParams = this.settings.extraQueryParams } = {}) {
         const logger2 = this._logger.create("createSignoutRequest");
         const url = await this.metadataService.getEndSessionEndpoint();
         if (!url) {
@@ -2267,7 +2526,8 @@ var OidcClient = class {
             post_logout_redirect_uri,
             state_data: state,
             extraQueryParams,
-            request_type
+            request_type,
+            url_state
         });
         await this.clearStaleState();
         const signoutState = request.state;
@@ -2296,7 +2556,7 @@ var OidcClient = class {
             logger2.throw(new Error("No matching state found in storage"));
             throw null;
         }
-        const state = State.fromStorageString(storedStateString);
+        const state = await State.fromStorageString(storedStateString);
         return {
             state,
             response
@@ -2334,11 +2594,9 @@ var SessionMonitor = class {
             const logger2 = this._logger.create("_start");
             if (user.profile) {
                 this._sub = user.profile.sub;
-                this._sid = user.profile.sid;
                 logger2.debug("session_state", session_state, ", sub", this._sub);
             } else {
                 this._sub = void 0;
-                this._sid = void 0;
                 logger2.debug("session_state", session_state, ", anonymous user");
             }
             if (this._checkSessionIFrame) {
@@ -2364,7 +2622,6 @@ var SessionMonitor = class {
         this._stop = ()=>{
             const logger2 = this._logger.create("_stop");
             this._sub = void 0;
-            this._sid = void 0;
             if (this._checkSessionIFrame) this._checkSessionIFrame.stop();
             if (this._userManager.settings.monitorAnonymousSession) {
                 const timerHandle = setInterval(async ()=>{
@@ -2374,9 +2631,8 @@ var SessionMonitor = class {
                         if (session) {
                             const tmpUser = {
                                 session_state: session.session_state,
-                                profile: session.sub && session.sid ? {
-                                    sub: session.sub,
-                                    sid: session.sid
+                                profile: session.sub ? {
+                                    sub: session.sub
                                 } : null
                             };
                             this._start(tmpUser);
@@ -2396,21 +2652,18 @@ var SessionMonitor = class {
                     if (session.sub === this._sub) {
                         raiseEvent = false;
                         this._checkSessionIFrame.start(session.session_state);
-                        if (session.sid === this._sid) logger2.debug("same sub still logged in at OP, restarting check session iframe; session_state", session.session_state);
-                        else {
-                            logger2.debug("same sub still logged in at OP, session state has changed, restarting check session iframe; session_state", session.session_state);
-                            this._userManager.events._raiseUserSessionChanged();
-                        }
+                        logger2.debug("same sub still logged in at OP, session state has changed, restarting check session iframe; session_state", session.session_state);
+                        await this._userManager.events._raiseUserSessionChanged();
                     } else logger2.debug("different subject signed into OP", session.sub);
                 } else logger2.debug("subject no longer signed into OP");
                 if (raiseEvent) {
-                    if (this._sub) this._userManager.events._raiseUserSignedOut();
-                    else this._userManager.events._raiseUserSignedIn();
+                    if (this._sub) await this._userManager.events._raiseUserSignedOut();
+                    else await this._userManager.events._raiseUserSignedIn();
                 } else logger2.debug("no change in session detected, no event to raise");
             } catch (err) {
                 if (this._sub) {
                     logger2.debug("Error calling queryCurrentSigninSession; raising signed out event", err);
-                    this._userManager.events._raiseUserSignedOut();
+                    await this._userManager.events._raiseUserSignedOut();
                 }
             }
         };
@@ -2430,9 +2683,8 @@ var SessionMonitor = class {
             if (session) {
                 const tmpUser = {
                     session_state: session.session_state,
-                    profile: session.sub && session.sid ? {
-                        sub: session.sub,
-                        sid: session.sid
+                    profile: session.sub ? {
+                        sub: session.sub
                     } : null
                 };
                 this._start(tmpUser);
@@ -2441,7 +2693,7 @@ var SessionMonitor = class {
     }
 };
 // src/User.ts
-var User = class {
+var User = class _User {
     constructor(args){
         var _a;
         this.id_token = args.id_token;
@@ -2486,7 +2738,7 @@ var User = class {
     }
     static fromStorageString(storageString) {
         Logger.createStatic("User", "fromStorageString");
-        return new User(JSON.parse(storageString));
+        return new _User(JSON.parse(storageString));
     }
 };
 // src/navigators/AbstractChildWindow.ts
@@ -2512,7 +2764,7 @@ var AbstractChildWindow = class {
                     const state = UrlUtils.readParams(data.url, params.response_mode).get("state");
                     if (!state) logger2.warn("no state found in response url");
                     if (e.source !== this._window && state !== params.state) return;
-                } catch (err) {
+                } catch  {
                     this._dispose();
                     reject(new Error("Invalid response from window"));
                 }
@@ -2520,6 +2772,9 @@ var AbstractChildWindow = class {
             };
             window.addEventListener("message", listener, false);
             this._disposeHandlers.add(()=>window.removeEventListener("message", listener, false));
+            const channel = new BroadcastChannel(`oidc-client-popup-${params.state}`);
+            channel.addEventListener("message", listener, false);
+            this._disposeHandlers.add(()=>channel.close());
             this._disposeHandlers.add(this._abort.addHandler((reason)=>{
                 this._dispose();
                 reject(reason);
@@ -2538,11 +2793,23 @@ var AbstractChildWindow = class {
         this._disposeHandlers.clear();
     }
     static _notifyParent(parent, url, keepOpen = false, targetOrigin = window.location.origin) {
-        parent.postMessage({
+        const msgData = {
             source: messageSource,
             url,
             keepOpen
-        }, targetOrigin);
+        };
+        const logger2 = new Logger("_notifyParent");
+        if (parent) {
+            logger2.debug("With parent. Using parent.postMessage.");
+            parent.postMessage(msgData, targetOrigin);
+        } else {
+            logger2.debug("No parent. Using BroadcastChannel.");
+            const state = new URL(url).searchParams.get("state");
+            if (!state) throw new Error("No parent and no state in URL. Can't complete notification.");
+            const channel = new BroadcastChannel(`oidc-client-popup-${state}`);
+            channel.postMessage(msgData);
+            channel.close();
+        }
     }
 };
 // src/UserManagerSettings.ts
@@ -2558,7 +2825,7 @@ var DefaultCheckSessionIntervalInSeconds = 2;
 var DefaultSilentRequestTimeoutInSeconds = 10;
 var UserManagerSettingsStore = class extends OidcClientSettingsStore {
     constructor(args){
-        const { popup_redirect_uri = args.redirect_uri, popup_post_logout_redirect_uri = args.post_logout_redirect_uri, popupWindowFeatures = DefaultPopupWindowFeatures, popupWindowTarget = DefaultPopupTarget, redirectMethod = "assign", redirectTarget = "self", iframeNotifyParentOrigin = args.iframeNotifyParentOrigin, iframeScriptOrigin = args.iframeScriptOrigin, silent_redirect_uri = args.redirect_uri, silentRequestTimeoutInSeconds = DefaultSilentRequestTimeoutInSeconds, automaticSilentRenew = true, validateSubOnSilentRenew = true, includeIdTokenInSilentRenew = false, monitorSession = false, monitorAnonymousSession = false, checkSessionIntervalInSeconds = DefaultCheckSessionIntervalInSeconds, query_status_response_type = "code", stopCheckSessionOnError = true, revokeTokenTypes = [
+        const { popup_redirect_uri = args.redirect_uri, popup_post_logout_redirect_uri = args.post_logout_redirect_uri, popupWindowFeatures = DefaultPopupWindowFeatures, popupWindowTarget = DefaultPopupTarget, redirectMethod = "assign", redirectTarget = "self", iframeNotifyParentOrigin = args.iframeNotifyParentOrigin, iframeScriptOrigin = args.iframeScriptOrigin, requestTimeoutInSeconds, silent_redirect_uri = args.redirect_uri, silentRequestTimeoutInSeconds, automaticSilentRenew = true, validateSubOnSilentRenew = true, includeIdTokenInSilentRenew = false, monitorSession = false, monitorAnonymousSession = false, checkSessionIntervalInSeconds = DefaultCheckSessionIntervalInSeconds, query_status_response_type = "code", stopCheckSessionOnError = true, revokeTokenTypes = [
             "access_token",
             "refresh_token"
         ], revokeTokensOnSignout = false, includeIdTokenInSilentSignout = false, accessTokenExpiringNotificationTimeInSeconds = DefaultAccessTokenExpiringNotificationTimeInSeconds, userStore } = args;
@@ -2572,7 +2839,7 @@ var UserManagerSettingsStore = class extends OidcClientSettingsStore {
         this.iframeNotifyParentOrigin = iframeNotifyParentOrigin;
         this.iframeScriptOrigin = iframeScriptOrigin;
         this.silent_redirect_uri = silent_redirect_uri;
-        this.silentRequestTimeoutInSeconds = silentRequestTimeoutInSeconds;
+        this.silentRequestTimeoutInSeconds = silentRequestTimeoutInSeconds || requestTimeoutInSeconds || DefaultSilentRequestTimeoutInSeconds;
         this.automaticSilentRenew = automaticSilentRenew;
         this.validateSubOnSilentRenew = validateSubOnSilentRenew;
         this.includeIdTokenInSilentRenew = includeIdTokenInSilentRenew;
@@ -2595,12 +2862,12 @@ var UserManagerSettingsStore = class extends OidcClientSettingsStore {
     }
 };
 // src/navigators/IFrameWindow.ts
-var IFrameWindow = class extends AbstractChildWindow {
+var IFrameWindow = class _IFrameWindow extends AbstractChildWindow {
     constructor({ silentRequestTimeoutInSeconds = DefaultSilentRequestTimeoutInSeconds }){
         super();
         this._logger = new Logger("IFrameWindow");
         this._timeoutInSeconds = silentRequestTimeoutInSeconds;
-        this._frame = IFrameWindow.createHiddenIframe();
+        this._frame = _IFrameWindow.createHiddenIframe();
         this._window = this._frame.contentWindow;
     }
     static createHiddenIframe() {
@@ -2616,7 +2883,7 @@ var IFrameWindow = class extends AbstractChildWindow {
     }
     async navigate(params) {
         this._logger.debug("navigate: Using timeout of:", this._timeoutInSeconds);
-        const timer = setTimeout(()=>this._abort.raise(new ErrorTimeout("IFrame timed out without a response")), this._timeoutInSeconds * 1e3);
+        const timer = setTimeout(()=>void this._abort.raise(new ErrorTimeout("IFrame timed out without a response")), this._timeoutInSeconds * 1e3);
         this._disposeHandlers.add(()=>clearTimeout(timer));
         return await super.navigate(params);
     }
@@ -2660,7 +2927,7 @@ var IFrameNavigator = class {
 var checkForPopupClosedInterval = 500;
 var second = 1e3;
 var PopupWindow = class extends AbstractChildWindow {
-    constructor({ popupWindowTarget = DefaultPopupTarget, popupWindowFeatures = {} }){
+    constructor({ popupWindowTarget = DefaultPopupTarget, popupWindowFeatures = {}, popupSignal }){
         super();
         this._logger = new Logger("PopupWindow");
         const centeredPopup = PopupUtils.center({
@@ -2668,6 +2935,10 @@ var PopupWindow = class extends AbstractChildWindow {
             ...popupWindowFeatures
         });
         this._window = window.open(void 0, popupWindowTarget, PopupUtils.serialize(centeredPopup));
+        if (popupSignal) popupSignal.addEventListener("abort", ()=>{
+            var _a;
+            this._abort.raise(new Error((_a = popupSignal.reason) != null ? _a : "Popup aborted"));
+        });
         if (popupWindowFeatures.closePopupWindowAfterInSeconds && popupWindowFeatures.closePopupWindowAfterInSeconds > 0) setTimeout(()=>{
             if (!this._window || typeof this._window.closed !== "boolean" || this._window.closed) {
                 this._abort.raise(new Error("Popup blocked by user"));
@@ -2680,9 +2951,14 @@ var PopupWindow = class extends AbstractChildWindow {
         var _a;
         (_a = this._window) == null || _a.focus();
         const popupClosedInterval = setInterval(()=>{
-            if (!this._window || this._window.closed) this._abort.raise(new Error("Popup closed by user"));
+            if (!this._window || this._window.closed) {
+                this._logger.debug("Popup closed by user or isolated by redirect");
+                clearPopupClosedInterval();
+                this._disposeHandlers.delete(clearPopupClosedInterval);
+            }
         }, checkForPopupClosedInterval);
-        this._disposeHandlers.add(()=>clearInterval(popupClosedInterval));
+        const clearPopupClosedInterval = ()=>clearInterval(popupClosedInterval);
+        this._disposeHandlers.add(clearPopupClosedInterval);
         return await super.navigate(params);
     }
     close() {
@@ -2695,8 +2971,8 @@ var PopupWindow = class extends AbstractChildWindow {
         this._window = null;
     }
     static notifyOpener(url, keepOpen) {
-        if (!window.opener) throw new Error("No window.opener. Can't complete notification.");
-        return super._notifyParent(window.opener, url, keepOpen);
+        super._notifyParent(window.opener, url, keepOpen);
+        if (!keepOpen && !window.opener) window.close();
     }
 };
 // src/navigators/PopupNavigator.ts
@@ -2705,10 +2981,11 @@ var PopupNavigator = class {
         this._settings = _settings;
         this._logger = new Logger("PopupNavigator");
     }
-    async prepare({ popupWindowFeatures = this._settings.popupWindowFeatures, popupWindowTarget = this._settings.popupWindowTarget }) {
+    async prepare({ popupWindowFeatures = this._settings.popupWindowFeatures, popupWindowTarget = this._settings.popupWindowTarget, popupSignal }) {
         return new PopupWindow({
             popupWindowFeatures,
-            popupWindowTarget
+            popupWindowTarget,
+            popupSignal
         });
     }
     async callback(url, { keepOpen = false }) {
@@ -2763,13 +3040,13 @@ var UserManagerEvents = class extends AccessTokenEvents {
         this._userSignedOut = new Event("User signed out");
         this._userSessionChanged = new Event("User session changed");
     }
-    load(user, raiseEvent = true) {
-        super.load(user);
-        if (raiseEvent) this._userLoaded.raise(user);
+    async load(user, raiseEvent = true) {
+        await super.load(user);
+        if (raiseEvent) await this._userLoaded.raise(user);
     }
-    unload() {
-        super.unload();
-        this._userUnloaded.raise();
+    async unload() {
+        await super.unload();
+        await this._userUnloaded.raise();
     }
     /**
    * Add callback: Raised when a user session has been established (or re-established).
@@ -2803,8 +3080,8 @@ var UserManagerEvents = class extends AccessTokenEvents {
     }
     /**
    * @internal
-   */ _raiseSilentRenewError(e) {
-        this._silentRenewError.raise(e);
+   */ async _raiseSilentRenewError(e) {
+        await this._silentRenewError.raise(e);
     }
     /**
    * Add callback: Raised when the user is signed in (when `monitorSession` is set).
@@ -2819,8 +3096,8 @@ var UserManagerEvents = class extends AccessTokenEvents {
     }
     /**
    * @internal
-   */ _raiseUserSignedIn() {
-        this._userSignedIn.raise();
+   */ async _raiseUserSignedIn() {
+        await this._userSignedIn.raise();
     }
     /**
    * Add callback: Raised when the user's sign-in status at the OP has changed (when `monitorSession` is set).
@@ -2835,8 +3112,8 @@ var UserManagerEvents = class extends AccessTokenEvents {
     }
     /**
    * @internal
-   */ _raiseUserSignedOut() {
-        this._userSignedOut.raise();
+   */ async _raiseUserSignedOut() {
+        await this._userSignedOut.raise();
     }
     /**
    * Add callback: Raised when the user session changed (when `monitorSession` is set).
@@ -2851,8 +3128,8 @@ var UserManagerEvents = class extends AccessTokenEvents {
     }
     /**
    * @internal
-   */ _raiseUserSessionChanged() {
-        this._userSessionChanged.raise();
+   */ async _raiseUserSessionChanged() {
+        await this._userSessionChanged.raise();
     }
 };
 // src/SilentRenewService.ts
@@ -2874,7 +3151,7 @@ var SilentRenewService = class {
                     return;
                 }
                 logger2.error("Error from signinSilent:", err);
-                this._userManager.events._raiseSilentRenewError(err);
+                await this._userManager.events._raiseSilentRenewError(err);
             }
         };
     }
@@ -2902,13 +3179,12 @@ var SilentRenewService = class {
 };
 // src/RefreshState.ts
 var RefreshState = class {
-    constructor(args, resource){
+    constructor(args){
         this.refresh_token = args.refresh_token;
         this.id_token = args.id_token;
         this.session_state = args.session_state;
         this.scope = args.scope;
         this.profile = args.profile;
-        this.resource = resource;
         this.data = args.state;
     }
 };
@@ -2927,48 +3203,70 @@ var UserManager = class {
         this._sessionMonitor = null;
         if (this.settings.monitorSession) this._sessionMonitor = new SessionMonitor(this);
     }
-    /** Returns an object used to register for events raised by the `UserManager`. */ get events() {
+    /**
+   * Get object used to register for events raised by the `UserManager`.
+   */ get events() {
         return this._events;
     }
-    /** Returns an object used to access the metadata configuration of the OIDC provider. */ get metadataService() {
+    /**
+   * Get object used to access the metadata configuration of the identity provider.
+   */ get metadataService() {
         return this._client.metadataService;
     }
     /**
-   * Returns promise to load the `User` object for the currently authenticated user.
-   */ async getUser() {
+   * Load the `User` object for the currently authenticated user.
+   *
+   * @param raiseEvent - If `true`, the `UserLoaded` event will be raised. Defaults to false.
+   * @returns A promise
+   */ async getUser(raiseEvent = false) {
         const logger2 = this._logger.create("getUser");
         const user = await this._loadUser();
         if (user) {
             logger2.info("user loaded");
-            this._events.load(user, false);
+            await this._events.load(user, raiseEvent);
             return user;
         }
         logger2.info("user not found in storage");
         return null;
     }
     /**
-   * Returns promise to remove from any storage the currently authenticated user.
+   * Remove from any storage the currently authenticated user.
+   *
+   * @returns A promise
    */ async removeUser() {
         const logger2 = this._logger.create("removeUser");
         await this.storeUser(null);
         logger2.info("user removed from storage");
-        this._events.unload();
+        await this._events.unload();
     }
     /**
-   * Returns promise to trigger a redirect of the current window to the authorization endpoint.
+   * Trigger a redirect of the current window to the authorization endpoint.
+   *
+   * @returns A promise
+   *
+   * @throws `Error` In cases of wrong authentication.
    */ async signinRedirect(args = {}) {
+        var _a;
         this._logger.create("signinRedirect");
         const { redirectMethod, ...requestArgs } = args;
+        let dpopJkt;
+        if ((_a = this.settings.dpop) == null ? void 0 : _a.bind_authorization_code) dpopJkt = await this.generateDPoPJkt(this.settings.dpop);
         const handle = await this._redirectNavigator.prepare({
             redirectMethod
         });
         await this._signinStart({
             request_type: "si:r",
+            dpopJkt,
             ...requestArgs
         }, handle);
     }
     /**
-   * Returns promise to process response from the authorization endpoint. The result of the promise is the authenticated `User`.
+   * Process the response (callback) from the authorization endpoint.
+   * It is recommended to use {@link UserManager.signinCallback} instead.
+   *
+   * @returns A promise containing the authenticated `User`.
+   *
+   * @see {@link UserManager.signinCallback}
    */ async signinRedirectCallback(url = window.location.href) {
         const logger2 = this._logger.create("signinRedirectCallback");
         const user = await this._signinEnd(url);
@@ -2977,9 +3275,10 @@ var UserManager = class {
         return user;
     }
     /**
-   * Returns promise to process the signin with user/password. The result of the promise is the authenticated `User`.
+   * Trigger the signin with user/password.
    *
-   * Throws an ErrorResponse in case of wrong authentication.
+   * @returns A promise containing the authenticated `User`.
+   * @throws {@link ErrorResponse} In cases of wrong authentication.
    */ async signinResourceOwnerCredentials({ username, password, skipUserInfo = false }) {
         const logger2 = this._logger.create("signinResourceOwnerCredential");
         const signinResponse = await this._client.processResourceOwnerPasswordCredentials({
@@ -2995,20 +3294,28 @@ var UserManager = class {
         return user;
     }
     /**
-   * Returns promise to trigger a request (via a popup window) to the authorization endpoint. The result of the promise is the authenticated `User`.
+   * Trigger a request (via a popup window) to the authorization endpoint.
+   *
+   * @returns A promise containing the authenticated `User`.
+   * @throws `Error` In cases of wrong authentication.
    */ async signinPopup(args = {}) {
+        var _a;
         const logger2 = this._logger.create("signinPopup");
-        const { popupWindowFeatures, popupWindowTarget, ...requestArgs } = args;
+        let dpopJkt;
+        if ((_a = this.settings.dpop) == null ? void 0 : _a.bind_authorization_code) dpopJkt = await this.generateDPoPJkt(this.settings.dpop);
+        const { popupWindowFeatures, popupWindowTarget, popupSignal, ...requestArgs } = args;
         const url = this.settings.popup_redirect_uri;
         if (!url) logger2.throw(new Error("No popup_redirect_uri configured"));
         const handle = await this._popupNavigator.prepare({
             popupWindowFeatures,
-            popupWindowTarget
+            popupWindowTarget,
+            popupSignal
         });
         const user = await this._signin({
             request_type: "si:p",
             redirect_uri: url,
             display: "popup",
+            dpopJkt,
             ...requestArgs
         }, handle);
         if (user) {
@@ -3018,7 +3325,12 @@ var UserManager = class {
         return user;
     }
     /**
-   * Returns promise to notify the opening window of response from the authorization endpoint.
+   * Notify the opening window of response (callback) from the authorization endpoint.
+   * It is recommended to use {@link UserManager.signinCallback} instead.
+   *
+   * @returns A promise
+   *
+   * @see {@link UserManager.signinCallback}
    */ async signinPopupCallback(url = window.location.href, keepOpen = false) {
         const logger2 = this._logger.create("signinPopupCallback");
         await this._popupNavigator.callback(url, {
@@ -3027,18 +3339,27 @@ var UserManager = class {
         logger2.info("success");
     }
     /**
-   * Returns promise to trigger a silent request (via an iframe) to the authorization endpoint.
-   * The result of the promise is the authenticated `User`.
+   * Trigger a silent request (via refresh token or an iframe) to the authorization endpoint.
+   *
+   * @returns A promise that contains the authenticated `User`.
    */ async signinSilent(args = {}) {
-        var _a;
+        var _a, _b;
         const logger2 = this._logger.create("signinSilent");
-        const { silentRequestTimeoutInSeconds, resource, ...requestArgs } = args;
+        const { silentRequestTimeoutInSeconds, ...requestArgs } = args;
         let user = await this._loadUser();
         if (user == null ? void 0 : user.refresh_token) {
             logger2.debug("using refresh token");
-            const state = new RefreshState(user, resource);
-            return await this._useRefreshToken(state);
+            const state = new RefreshState(user);
+            return await this._useRefreshToken({
+                state,
+                redirect_uri: requestArgs.redirect_uri,
+                resource: requestArgs.resource,
+                extraTokenParams: requestArgs.extraTokenParams,
+                timeoutInSeconds: silentRequestTimeoutInSeconds
+            });
         }
+        let dpopJkt;
+        if ((_a = this.settings.dpop) == null ? void 0 : _a.bind_authorization_code) dpopJkt = await this.generateDPoPJkt(this.settings.dpop);
         const url = this.settings.silent_redirect_uri;
         if (!url) logger2.throw(new Error("No silent_redirect_uri configured"));
         let verifySub;
@@ -3054,48 +3375,74 @@ var UserManager = class {
             redirect_uri: url,
             prompt: "none",
             id_token_hint: this.settings.includeIdTokenInSilentRenew ? user == null ? void 0 : user.id_token : void 0,
+            dpopJkt,
             ...requestArgs
         }, handle, verifySub);
         if (user) {
-            if ((_a = user.profile) == null ? void 0 : _a.sub) logger2.info("success, signed in subject", user.profile.sub);
+            if ((_b = user.profile) == null ? void 0 : _b.sub) logger2.info("success, signed in subject", user.profile.sub);
             else logger2.info("no subject");
         }
         return user;
     }
-    async _useRefreshToken(state) {
+    async _useRefreshToken(args) {
         const response = await this._client.useRefreshToken({
-            state,
-            timeoutInSeconds: this.settings.silentRequestTimeoutInSeconds
+            timeoutInSeconds: this.settings.silentRequestTimeoutInSeconds,
+            ...args
         });
         const user = new User({
-            ...state,
+            ...args.state,
             ...response
         });
         await this.storeUser(user);
-        this._events.load(user);
+        await this._events.load(user);
         return user;
     }
     /**
-   * Returns promise to notify the parent window of response from the authorization endpoint.
+   *
+   * Notify the parent window of response (callback) from the authorization endpoint.
+   * It is recommended to use {@link UserManager.signinCallback} instead.
+   *
+   * @returns A promise
+   *
+   * @see {@link UserManager.signinCallback}
    */ async signinSilentCallback(url = window.location.href) {
         const logger2 = this._logger.create("signinSilentCallback");
         await this._iframeNavigator.callback(url);
         logger2.info("success");
     }
-    async signinCallback(url = window.location.href) {
+    /**
+   * Process any response (callback) from the authorization endpoint, by dispatching the request_type
+   * and executing one of the following functions:
+   * - {@link UserManager.signinRedirectCallback}
+   * - {@link UserManager.signinPopupCallback}
+   * - {@link UserManager.signinSilentCallback}
+   *
+   * @throws `Error` If request_type is unknown or signin cannot be processed.
+   */ async signinCallback(url = window.location.href) {
         const { state } = await this._client.readSigninResponseState(url);
         switch(state.request_type){
             case "si:r":
                 return await this.signinRedirectCallback(url);
             case "si:p":
-                return await this.signinPopupCallback(url);
+                await this.signinPopupCallback(url);
+                break;
             case "si:s":
-                return await this.signinSilentCallback(url);
+                await this.signinSilentCallback(url);
+                break;
             default:
                 throw new Error("invalid response_type in state");
         }
+        return void 0;
     }
-    async signoutCallback(url = window.location.href, keepOpen = false) {
+    /**
+   * Process any response (callback) from the end session endpoint, by dispatching the request_type
+   * and executing one of the following functions:
+   * - {@link UserManager.signoutRedirectCallback}
+   * - {@link UserManager.signoutPopupCallback}
+   * - {@link UserManager.signoutSilentCallback}
+   *
+   * @throws `Error` If request_type is unknown or signout cannot be processed.
+   */ async signoutCallback(url = window.location.href, keepOpen = false) {
         const { state } = await this._client.readSignoutResponseState(url);
         if (!state) return void 0;
         switch(state.request_type){
@@ -3113,7 +3460,9 @@ var UserManager = class {
         return void 0;
     }
     /**
-   * Returns promise to query OP for user's current signin status. Returns object with session_state and subject identifier.
+   * Query OP for user's current signin status.
+   *
+   * @returns A promise object with session_state and subject identifier.
    */ async querySessionStatus(args = {}) {
         const logger2 = this._logger.create("querySessionStatus");
         const { silentRequestTimeoutInSeconds, ...requestArgs } = args;
@@ -3135,14 +3484,14 @@ var UserManager = class {
             ...requestArgs
         }, handle);
         try {
-            const signinResponse = await this._client.processSigninResponse(navResponse.url);
+            const extraHeaders = {};
+            const signinResponse = await this._client.processSigninResponse(navResponse.url, extraHeaders);
             logger2.debug("got signin response");
             if (signinResponse.session_state && signinResponse.profile.sub) {
                 logger2.info("success for subject", signinResponse.profile.sub);
                 return {
                     session_state: signinResponse.session_state,
-                    sub: signinResponse.profile.sub,
-                    sid: signinResponse.profile.sid
+                    sub: signinResponse.profile.sub
                 };
             }
             logger2.info("success, user not authenticated");
@@ -3155,7 +3504,6 @@ var UserManager = class {
                 case "account_selection_required":
                     logger2.info("success for anonymous user");
                     return {
-                        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
                         session_state: err.session_state
                     };
             }
@@ -3185,7 +3533,8 @@ var UserManager = class {
     }
     async _signinEnd(url, verifySub) {
         const logger2 = this._logger.create("_signinEnd");
-        const signinResponse = await this._client.processSigninResponse(url);
+        const extraHeaders = {};
+        const signinResponse = await this._client.processSigninResponse(url, extraHeaders);
         logger2.debug("got signin response");
         const user = await this._buildUser(signinResponse, verifySub);
         return user;
@@ -3205,11 +3554,13 @@ var UserManager = class {
         }
         await this.storeUser(user);
         logger2.debug("user stored");
-        this._events.load(user);
+        await this._events.load(user);
         return user;
     }
     /**
-   * Returns promise to trigger a redirect of the current window to the end session endpoint.
+   * Trigger a redirect of the current window to the end session endpoint.
+   *
+   * @returns A promise
    */ async signoutRedirect(args = {}) {
         const logger2 = this._logger.create("signoutRedirect");
         const { redirectMethod, ...requestArgs } = args;
@@ -3224,7 +3575,12 @@ var UserManager = class {
         logger2.info("success");
     }
     /**
-   * Returns promise to process response from the end session endpoint.
+   * Process response (callback) from the end session endpoint.
+   * It is recommended to use {@link UserManager.signoutCallback} instead.
+   *
+   * @returns A promise containing signout response
+   *
+   * @see {@link UserManager.signoutCallback}
    */ async signoutRedirectCallback(url = window.location.href) {
         const logger2 = this._logger.create("signoutRedirectCallback");
         const response = await this._signoutEnd(url);
@@ -3232,14 +3588,17 @@ var UserManager = class {
         return response;
     }
     /**
-   * Returns promise to trigger a redirect of a popup window window to the end session endpoint.
+   * Trigger a redirect of a popup window to the end session endpoint.
+   *
+   * @returns A promise
    */ async signoutPopup(args = {}) {
         const logger2 = this._logger.create("signoutPopup");
-        const { popupWindowFeatures, popupWindowTarget, ...requestArgs } = args;
+        const { popupWindowFeatures, popupWindowTarget, popupSignal, ...requestArgs } = args;
         const url = this.settings.popup_post_logout_redirect_uri;
         const handle = await this._popupNavigator.prepare({
             popupWindowFeatures,
-            popupWindowTarget
+            popupWindowTarget,
+            popupSignal
         });
         await this._signout({
             request_type: "so:p",
@@ -3255,7 +3614,12 @@ var UserManager = class {
         logger2.info("success");
     }
     /**
-   * Returns promise to process response from the end session endpoint from a popup window.
+   * Process response (callback) from the end session endpoint from a popup window.
+   * It is recommended to use {@link UserManager.signoutCallback} instead.
+   *
+   * @returns A promise
+   *
+   * @see {@link UserManager.signoutCallback}
    */ async signoutPopupCallback(url = window.location.href, keepOpen = false) {
         const logger2 = this._logger.create("signoutPopupCallback");
         await this._popupNavigator.callback(url, {
@@ -3301,7 +3665,9 @@ var UserManager = class {
         return signoutResponse;
     }
     /**
-   * Returns promise to trigger a silent request (via an iframe) to the end session endpoint.
+   * Trigger a silent request (via an iframe) to the end session endpoint.
+   *
+   * @returns A promise
    */ async signoutSilent(args = {}) {
         var _a;
         const logger2 = this._logger.create("signoutSilent");
@@ -3320,7 +3686,12 @@ var UserManager = class {
         logger2.info("success");
     }
     /**
-   * Returns promise to notify the parent window of response from the end session endpoint.
+   * Notify the parent window of response (callback) from the end session endpoint.
+   * It is recommended to use {@link UserManager.signoutCallback} instead.
+   *
+   * @returns A promise
+   *
+   * @see {@link UserManager.signoutCallback}
    */ async signoutSilentCallback(url = window.location.href) {
         const logger2 = this._logger.create("signoutSilentCallback");
         await this._iframeNavigator.callback(url);
@@ -3339,14 +3710,13 @@ var UserManager = class {
             return;
         }
         for (const type of typesPresent){
-            await this._client.revokeToken(user[type], // eslint-disable-line @typescript-eslint/no-non-null-assertion
-            type);
+            await this._client.revokeToken(user[type], type);
             logger2.info(`${type} revoked successfully`);
             if (type !== "access_token") user[type] = null;
         }
         await this.storeUser(user);
         logger2.debug("user stored");
-        this._events.load(user);
+        await this._events.load(user);
     }
     /**
    * Enables silent renew for the `UserManager`.
@@ -3381,6 +3751,7 @@ var UserManager = class {
         } else {
             this._logger.debug("removing user");
             await this.settings.userStore.remove(this._userStoreKey);
+            if (this.settings.dpop) await this.settings.dpop.store.remove(this.settings.client_id);
         }
     }
     /**
@@ -3388,929 +3759,146 @@ var UserManager = class {
    */ async clearStaleState() {
         await this._client.clearStaleState();
     }
+    /**
+   * Dynamically generates a DPoP proof for a given user, URL and optional Http method.
+   * This method is useful when you need to make a request to a resource server
+   * with fetch or similar, and you need to include a DPoP proof in a DPoP header.
+   * @param url - The URL to generate the DPoP proof for
+   * @param user - The user to generate the DPoP proof for
+   * @param httpMethod - Optional, defaults to "GET"
+   * @param nonce - Optional nonce provided by the resource server
+   *
+   * @returns A promise containing the DPoP proof or undefined if DPoP is not enabled/no user is found.
+   */ async dpopProof(url, user, httpMethod, nonce) {
+        var _a, _b;
+        const dpopState = await ((_b = (_a = this.settings.dpop) == null ? void 0 : _a.store) == null ? void 0 : _b.get(this.settings.client_id));
+        if (dpopState) return await CryptoUtils.generateDPoPProof({
+            url,
+            accessToken: user == null ? void 0 : user.access_token,
+            httpMethod,
+            keyPair: dpopState.keys,
+            nonce
+        });
+        return void 0;
+    }
+    async generateDPoPJkt(dpopSettings) {
+        let dpopState = await dpopSettings.store.get(this.settings.client_id);
+        if (!dpopState) {
+            const dpopKeys = await CryptoUtils.generateDPoPKeys();
+            dpopState = new DPoPState(dpopKeys);
+            await dpopSettings.store.set(this.settings.client_id, dpopState);
+        }
+        return await CryptoUtils.generateDPoPJkt(dpopState.keys);
+    }
 };
 // package.json
-var version = "2.4.1";
+var version = "3.3.0";
 // src/Version.ts
 var Version = version;
-
-},{"cd65f2846f9a9917":"g2BaY","b081c80cbcca67d0":"bHJno","69a1441ed613820e":"a3Jjc","46685f198d718556":"hwYs8","3455b80cc963b26":"1Wg18"}],"g2BaY":[function(require,module,exports,__globalThis) {
-var global = arguments[3];
-(function(root, factory) {
-    // CommonJS
-    module.exports = exports = factory();
-})(this, function() {
-    /*globals window, global, require*/ /**
-	 * CryptoJS core components.
-	 */ var CryptoJS = CryptoJS || function(Math1, undefined) {
-        var crypto;
-        // Native crypto from window (Browser)
-        if (typeof window !== 'undefined' && window.crypto) crypto = window.crypto;
-        // Native crypto in web worker (Browser)
-        if (typeof self !== 'undefined' && self.crypto) crypto = self.crypto;
-        // Native crypto from worker
-        if (typeof globalThis !== 'undefined' && globalThis.crypto) crypto = globalThis.crypto;
-        // Native (experimental IE 11) crypto from window (Browser)
-        if (!crypto && typeof window !== 'undefined' && window.msCrypto) crypto = window.msCrypto;
-        // Native crypto from global (NodeJS)
-        if (!crypto && typeof global !== 'undefined' && global.crypto) crypto = global.crypto;
-        // Native crypto import via require (NodeJS)
-        if (!crypto && true) try {
-            crypto = require("b7760e5f0b7216d4");
-        } catch (err) {}
-        /*
-	     * Cryptographically secure pseudorandom number generator
-	     *
-	     * As Math.random() is cryptographically not safe to use
-	     */ var cryptoSecureRandomInt = function() {
-            if (crypto) {
-                // Use getRandomValues method (Browser)
-                if (typeof crypto.getRandomValues === 'function') try {
-                    return crypto.getRandomValues(new Uint32Array(1))[0];
-                } catch (err) {}
-                // Use randomBytes method (NodeJS)
-                if (typeof crypto.randomBytes === 'function') try {
-                    return crypto.randomBytes(4).readInt32LE();
-                } catch (err) {}
-            }
-            throw new Error('Native crypto module could not be used to get secure random number.');
-        };
-        /*
-	     * Local polyfill of Object.create
-
-	     */ var create = Object.create || function() {
-            function F() {}
-            return function(obj) {
-                var subtype;
-                F.prototype = obj;
-                subtype = new F();
-                F.prototype = null;
-                return subtype;
-            };
-        }();
-        /**
-	     * CryptoJS namespace.
-	     */ var C = {};
-        /**
-	     * Library namespace.
-	     */ var C_lib = C.lib = {};
-        /**
-	     * Base object for prototypal inheritance.
-	     */ var Base = C_lib.Base = function() {
-            return {
-                /**
-	             * Creates a new object that inherits from this object.
-	             *
-	             * @param {Object} overrides Properties to copy into the new object.
-	             *
-	             * @return {Object} The new object.
-	             *
-	             * @static
-	             *
-	             * @example
-	             *
-	             *     var MyType = CryptoJS.lib.Base.extend({
-	             *         field: 'value',
-	             *
-	             *         method: function () {
-	             *         }
-	             *     });
-	             */ extend: function(overrides) {
-                    // Spawn
-                    var subtype = create(this);
-                    // Augment
-                    if (overrides) subtype.mixIn(overrides);
-                    // Create default initializer
-                    if (!subtype.hasOwnProperty('init') || this.init === subtype.init) subtype.init = function() {
-                        subtype.$super.init.apply(this, arguments);
-                    };
-                    // Initializer's prototype is the subtype object
-                    subtype.init.prototype = subtype;
-                    // Reference supertype
-                    subtype.$super = this;
-                    return subtype;
-                },
-                /**
-	             * Extends this object and runs the init method.
-	             * Arguments to create() will be passed to init().
-	             *
-	             * @return {Object} The new object.
-	             *
-	             * @static
-	             *
-	             * @example
-	             *
-	             *     var instance = MyType.create();
-	             */ create: function() {
-                    var instance = this.extend();
-                    instance.init.apply(instance, arguments);
-                    return instance;
-                },
-                /**
-	             * Initializes a newly created object.
-	             * Override this method to add some logic when your objects are created.
-	             *
-	             * @example
-	             *
-	             *     var MyType = CryptoJS.lib.Base.extend({
-	             *         init: function () {
-	             *             // ...
-	             *         }
-	             *     });
-	             */ init: function() {},
-                /**
-	             * Copies properties into this object.
-	             *
-	             * @param {Object} properties The properties to mix in.
-	             *
-	             * @example
-	             *
-	             *     MyType.mixIn({
-	             *         field: 'value'
-	             *     });
-	             */ mixIn: function(properties) {
-                    for(var propertyName in properties)if (properties.hasOwnProperty(propertyName)) this[propertyName] = properties[propertyName];
-                    // IE won't copy toString using the loop above
-                    if (properties.hasOwnProperty('toString')) this.toString = properties.toString;
-                },
-                /**
-	             * Creates a copy of this object.
-	             *
-	             * @return {Object} The clone.
-	             *
-	             * @example
-	             *
-	             *     var clone = instance.clone();
-	             */ clone: function() {
-                    return this.init.prototype.extend(this);
-                }
-            };
-        }();
-        /**
-	     * An array of 32-bit words.
-	     *
-	     * @property {Array} words The array of 32-bit words.
-	     * @property {number} sigBytes The number of significant bytes in this word array.
-	     */ var WordArray = C_lib.WordArray = Base.extend({
-            /**
-	         * Initializes a newly created word array.
-	         *
-	         * @param {Array} words (Optional) An array of 32-bit words.
-	         * @param {number} sigBytes (Optional) The number of significant bytes in the words.
-	         *
-	         * @example
-	         *
-	         *     var wordArray = CryptoJS.lib.WordArray.create();
-	         *     var wordArray = CryptoJS.lib.WordArray.create([0x00010203, 0x04050607]);
-	         *     var wordArray = CryptoJS.lib.WordArray.create([0x00010203, 0x04050607], 6);
-	         */ init: function(words, sigBytes) {
-                words = this.words = words || [];
-                if (sigBytes != undefined) this.sigBytes = sigBytes;
-                else this.sigBytes = words.length * 4;
-            },
-            /**
-	         * Converts this word array to a string.
-	         *
-	         * @param {Encoder} encoder (Optional) The encoding strategy to use. Default: CryptoJS.enc.Hex
-	         *
-	         * @return {string} The stringified word array.
-	         *
-	         * @example
-	         *
-	         *     var string = wordArray + '';
-	         *     var string = wordArray.toString();
-	         *     var string = wordArray.toString(CryptoJS.enc.Utf8);
-	         */ toString: function(encoder) {
-                return (encoder || Hex).stringify(this);
-            },
-            /**
-	         * Concatenates a word array to this word array.
-	         *
-	         * @param {WordArray} wordArray The word array to append.
-	         *
-	         * @return {WordArray} This word array.
-	         *
-	         * @example
-	         *
-	         *     wordArray1.concat(wordArray2);
-	         */ concat: function(wordArray) {
-                // Shortcuts
-                var thisWords = this.words;
-                var thatWords = wordArray.words;
-                var thisSigBytes = this.sigBytes;
-                var thatSigBytes = wordArray.sigBytes;
-                // Clamp excess bits
-                this.clamp();
-                // Concat
-                if (thisSigBytes % 4) // Copy one byte at a time
-                for(var i = 0; i < thatSigBytes; i++){
-                    var thatByte = thatWords[i >>> 2] >>> 24 - i % 4 * 8 & 0xff;
-                    thisWords[thisSigBytes + i >>> 2] |= thatByte << 24 - (thisSigBytes + i) % 4 * 8;
-                }
-                else // Copy one word at a time
-                for(var j = 0; j < thatSigBytes; j += 4)thisWords[thisSigBytes + j >>> 2] = thatWords[j >>> 2];
-                this.sigBytes += thatSigBytes;
-                // Chainable
-                return this;
-            },
-            /**
-	         * Removes insignificant bits.
-	         *
-	         * @example
-	         *
-	         *     wordArray.clamp();
-	         */ clamp: function() {
-                // Shortcuts
-                var words = this.words;
-                var sigBytes = this.sigBytes;
-                // Clamp
-                words[sigBytes >>> 2] &= 0xffffffff << 32 - sigBytes % 4 * 8;
-                words.length = Math1.ceil(sigBytes / 4);
-            },
-            /**
-	         * Creates a copy of this word array.
-	         *
-	         * @return {WordArray} The clone.
-	         *
-	         * @example
-	         *
-	         *     var clone = wordArray.clone();
-	         */ clone: function() {
-                var clone = Base.clone.call(this);
-                clone.words = this.words.slice(0);
-                return clone;
-            },
-            /**
-	         * Creates a word array filled with random bytes.
-	         *
-	         * @param {number} nBytes The number of random bytes to generate.
-	         *
-	         * @return {WordArray} The random word array.
-	         *
-	         * @static
-	         *
-	         * @example
-	         *
-	         *     var wordArray = CryptoJS.lib.WordArray.random(16);
-	         */ random: function(nBytes) {
-                var words = [];
-                for(var i = 0; i < nBytes; i += 4)words.push(cryptoSecureRandomInt());
-                return new WordArray.init(words, nBytes);
-            }
+// src/IndexedDbDPoPStore.ts
+var IndexedDbDPoPStore = class {
+    constructor(){
+        this._dbName = "oidc";
+        this._storeName = "dpop";
+    }
+    async set(key, value) {
+        const store = await this.createStore(this._dbName, this._storeName);
+        await store("readwrite", (str)=>{
+            str.put(value, key);
+            return this.promisifyRequest(str.transaction);
         });
-        /**
-	     * Encoder namespace.
-	     */ var C_enc = C.enc = {};
-        /**
-	     * Hex encoding strategy.
-	     */ var Hex = C_enc.Hex = {
-            /**
-	         * Converts a word array to a hex string.
-	         *
-	         * @param {WordArray} wordArray The word array.
-	         *
-	         * @return {string} The hex string.
-	         *
-	         * @static
-	         *
-	         * @example
-	         *
-	         *     var hexString = CryptoJS.enc.Hex.stringify(wordArray);
-	         */ stringify: function(wordArray) {
-                // Shortcuts
-                var words = wordArray.words;
-                var sigBytes = wordArray.sigBytes;
-                // Convert
-                var hexChars = [];
-                for(var i = 0; i < sigBytes; i++){
-                    var bite = words[i >>> 2] >>> 24 - i % 4 * 8 & 0xff;
-                    hexChars.push((bite >>> 4).toString(16));
-                    hexChars.push((bite & 0x0f).toString(16));
-                }
-                return hexChars.join('');
-            },
-            /**
-	         * Converts a hex string to a word array.
-	         *
-	         * @param {string} hexStr The hex string.
-	         *
-	         * @return {WordArray} The word array.
-	         *
-	         * @static
-	         *
-	         * @example
-	         *
-	         *     var wordArray = CryptoJS.enc.Hex.parse(hexString);
-	         */ parse: function(hexStr) {
-                // Shortcut
-                var hexStrLength = hexStr.length;
-                // Convert
-                var words = [];
-                for(var i = 0; i < hexStrLength; i += 2)words[i >>> 3] |= parseInt(hexStr.substr(i, 2), 16) << 24 - i % 8 * 4;
-                return new WordArray.init(words, hexStrLength / 2);
-            }
-        };
-        /**
-	     * Latin1 encoding strategy.
-	     */ var Latin1 = C_enc.Latin1 = {
-            /**
-	         * Converts a word array to a Latin1 string.
-	         *
-	         * @param {WordArray} wordArray The word array.
-	         *
-	         * @return {string} The Latin1 string.
-	         *
-	         * @static
-	         *
-	         * @example
-	         *
-	         *     var latin1String = CryptoJS.enc.Latin1.stringify(wordArray);
-	         */ stringify: function(wordArray) {
-                // Shortcuts
-                var words = wordArray.words;
-                var sigBytes = wordArray.sigBytes;
-                // Convert
-                var latin1Chars = [];
-                for(var i = 0; i < sigBytes; i++){
-                    var bite = words[i >>> 2] >>> 24 - i % 4 * 8 & 0xff;
-                    latin1Chars.push(String.fromCharCode(bite));
-                }
-                return latin1Chars.join('');
-            },
-            /**
-	         * Converts a Latin1 string to a word array.
-	         *
-	         * @param {string} latin1Str The Latin1 string.
-	         *
-	         * @return {WordArray} The word array.
-	         *
-	         * @static
-	         *
-	         * @example
-	         *
-	         *     var wordArray = CryptoJS.enc.Latin1.parse(latin1String);
-	         */ parse: function(latin1Str) {
-                // Shortcut
-                var latin1StrLength = latin1Str.length;
-                // Convert
-                var words = [];
-                for(var i = 0; i < latin1StrLength; i++)words[i >>> 2] |= (latin1Str.charCodeAt(i) & 0xff) << 24 - i % 4 * 8;
-                return new WordArray.init(words, latin1StrLength);
-            }
-        };
-        /**
-	     * UTF-8 encoding strategy.
-	     */ var Utf8 = C_enc.Utf8 = {
-            /**
-	         * Converts a word array to a UTF-8 string.
-	         *
-	         * @param {WordArray} wordArray The word array.
-	         *
-	         * @return {string} The UTF-8 string.
-	         *
-	         * @static
-	         *
-	         * @example
-	         *
-	         *     var utf8String = CryptoJS.enc.Utf8.stringify(wordArray);
-	         */ stringify: function(wordArray) {
-                try {
-                    return decodeURIComponent(escape(Latin1.stringify(wordArray)));
-                } catch (e) {
-                    throw new Error('Malformed UTF-8 data');
-                }
-            },
-            /**
-	         * Converts a UTF-8 string to a word array.
-	         *
-	         * @param {string} utf8Str The UTF-8 string.
-	         *
-	         * @return {WordArray} The word array.
-	         *
-	         * @static
-	         *
-	         * @example
-	         *
-	         *     var wordArray = CryptoJS.enc.Utf8.parse(utf8String);
-	         */ parse: function(utf8Str) {
-                return Latin1.parse(unescape(encodeURIComponent(utf8Str)));
-            }
-        };
-        /**
-	     * Abstract buffered block algorithm template.
-	     *
-	     * The property blockSize must be implemented in a concrete subtype.
-	     *
-	     * @property {number} _minBufferSize The number of blocks that should be kept unprocessed in the buffer. Default: 0
-	     */ var BufferedBlockAlgorithm = C_lib.BufferedBlockAlgorithm = Base.extend({
-            /**
-	         * Resets this block algorithm's data buffer to its initial state.
-	         *
-	         * @example
-	         *
-	         *     bufferedBlockAlgorithm.reset();
-	         */ reset: function() {
-                // Initial values
-                this._data = new WordArray.init();
-                this._nDataBytes = 0;
-            },
-            /**
-	         * Adds new data to this block algorithm's buffer.
-	         *
-	         * @param {WordArray|string} data The data to append. Strings are converted to a WordArray using UTF-8.
-	         *
-	         * @example
-	         *
-	         *     bufferedBlockAlgorithm._append('data');
-	         *     bufferedBlockAlgorithm._append(wordArray);
-	         */ _append: function(data) {
-                // Convert string to WordArray, else assume WordArray already
-                if (typeof data == 'string') data = Utf8.parse(data);
-                // Append
-                this._data.concat(data);
-                this._nDataBytes += data.sigBytes;
-            },
-            /**
-	         * Processes available data blocks.
-	         *
-	         * This method invokes _doProcessBlock(offset), which must be implemented by a concrete subtype.
-	         *
-	         * @param {boolean} doFlush Whether all blocks and partial blocks should be processed.
-	         *
-	         * @return {WordArray} The processed data.
-	         *
-	         * @example
-	         *
-	         *     var processedData = bufferedBlockAlgorithm._process();
-	         *     var processedData = bufferedBlockAlgorithm._process(!!'flush');
-	         */ _process: function(doFlush) {
-                var processedWords;
-                // Shortcuts
-                var data = this._data;
-                var dataWords = data.words;
-                var dataSigBytes = data.sigBytes;
-                var blockSize = this.blockSize;
-                var blockSizeBytes = blockSize * 4;
-                // Count blocks ready
-                var nBlocksReady = dataSigBytes / blockSizeBytes;
-                if (doFlush) // Round up to include partial blocks
-                nBlocksReady = Math1.ceil(nBlocksReady);
-                else // Round down to include only full blocks,
-                // less the number of blocks that must remain in the buffer
-                nBlocksReady = Math1.max((nBlocksReady | 0) - this._minBufferSize, 0);
-                // Count words ready
-                var nWordsReady = nBlocksReady * blockSize;
-                // Count bytes ready
-                var nBytesReady = Math1.min(nWordsReady * 4, dataSigBytes);
-                // Process blocks
-                if (nWordsReady) {
-                    for(var offset = 0; offset < nWordsReady; offset += blockSize)// Perform concrete-algorithm logic
-                    this._doProcessBlock(dataWords, offset);
-                    // Remove processed words
-                    processedWords = dataWords.splice(0, nWordsReady);
-                    data.sigBytes -= nBytesReady;
-                }
-                // Return processed words
-                return new WordArray.init(processedWords, nBytesReady);
-            },
-            /**
-	         * Creates a copy of this object.
-	         *
-	         * @return {Object} The clone.
-	         *
-	         * @example
-	         *
-	         *     var clone = bufferedBlockAlgorithm.clone();
-	         */ clone: function() {
-                var clone = Base.clone.call(this);
-                clone._data = this._data.clone();
-                return clone;
-            },
-            _minBufferSize: 0
+    }
+    async get(key) {
+        const store = await this.createStore(this._dbName, this._storeName);
+        return await store("readonly", (str)=>{
+            return this.promisifyRequest(str.get(key));
         });
-        /**
-	     * Abstract hasher template.
-	     *
-	     * @property {number} blockSize The number of 32-bit words this hasher operates on. Default: 16 (512 bits)
-	     */ var Hasher = C_lib.Hasher = BufferedBlockAlgorithm.extend({
-            /**
-	         * Configuration options.
-	         */ cfg: Base.extend(),
-            /**
-	         * Initializes a newly created hasher.
-	         *
-	         * @param {Object} cfg (Optional) The configuration options to use for this hash computation.
-	         *
-	         * @example
-	         *
-	         *     var hasher = CryptoJS.algo.SHA256.create();
-	         */ init: function(cfg) {
-                // Apply config defaults
-                this.cfg = this.cfg.extend(cfg);
-                // Set initial values
-                this.reset();
-            },
-            /**
-	         * Resets this hasher to its initial state.
-	         *
-	         * @example
-	         *
-	         *     hasher.reset();
-	         */ reset: function() {
-                // Reset data buffer
-                BufferedBlockAlgorithm.reset.call(this);
-                // Perform concrete-hasher logic
-                this._doReset();
-            },
-            /**
-	         * Updates this hasher with a message.
-	         *
-	         * @param {WordArray|string} messageUpdate The message to append.
-	         *
-	         * @return {Hasher} This hasher.
-	         *
-	         * @example
-	         *
-	         *     hasher.update('message');
-	         *     hasher.update(wordArray);
-	         */ update: function(messageUpdate) {
-                // Append
-                this._append(messageUpdate);
-                // Update the hash
-                this._process();
-                // Chainable
-                return this;
-            },
-            /**
-	         * Finalizes the hash computation.
-	         * Note that the finalize operation is effectively a destructive, read-once operation.
-	         *
-	         * @param {WordArray|string} messageUpdate (Optional) A final message update.
-	         *
-	         * @return {WordArray} The hash.
-	         *
-	         * @example
-	         *
-	         *     var hash = hasher.finalize();
-	         *     var hash = hasher.finalize('message');
-	         *     var hash = hasher.finalize(wordArray);
-	         */ finalize: function(messageUpdate) {
-                // Final message update
-                if (messageUpdate) this._append(messageUpdate);
-                // Perform concrete-hasher logic
-                var hash = this._doFinalize();
-                return hash;
-            },
-            blockSize: 16,
-            /**
-	         * Creates a shortcut function to a hasher's object interface.
-	         *
-	         * @param {Hasher} hasher The hasher to create a helper for.
-	         *
-	         * @return {Function} The shortcut function.
-	         *
-	         * @static
-	         *
-	         * @example
-	         *
-	         *     var SHA256 = CryptoJS.lib.Hasher._createHelper(CryptoJS.algo.SHA256);
-	         */ _createHelper: function(hasher) {
-                return function(message, cfg) {
-                    return new hasher.init(cfg).finalize(message);
-                };
-            },
-            /**
-	         * Creates a shortcut function to the HMAC's object interface.
-	         *
-	         * @param {Hasher} hasher The hasher to use in this HMAC helper.
-	         *
-	         * @return {Function} The shortcut function.
-	         *
-	         * @static
-	         *
-	         * @example
-	         *
-	         *     var HmacSHA256 = CryptoJS.lib.Hasher._createHmacHelper(CryptoJS.algo.SHA256);
-	         */ _createHmacHelper: function(hasher) {
-                return function(message, key) {
-                    return new C_algo.HMAC.init(hasher, key).finalize(message);
-                };
-            }
+    }
+    async remove(key) {
+        const item = await this.get(key);
+        const store = await this.createStore(this._dbName, this._storeName);
+        await store("readwrite", (str)=>{
+            return this.promisifyRequest(str.delete(key));
         });
-        /**
-	     * Algorithm namespace.
-	     */ var C_algo = C.algo = {};
-        return C;
-    }(Math);
-    return CryptoJS;
-});
-
-},{"b7760e5f0b7216d4":"eoH60"}],"eoH60":[function(require,module,exports,__globalThis) {
-"use strict";
-
-},{}],"bHJno":[function(require,module,exports,__globalThis) {
-(function(root, factory) {
-    // CommonJS
-    module.exports = exports = factory(require("cd9e8447cb14a145"));
-})(this, function(CryptoJS) {
-    (function(Math1) {
-        // Shortcuts
-        var C = CryptoJS;
-        var C_lib = C.lib;
-        var WordArray = C_lib.WordArray;
-        var Hasher = C_lib.Hasher;
-        var C_algo = C.algo;
-        // Initialization and round constants tables
-        var H = [];
-        var K = [];
-        // Compute constants
-        (function() {
-            function isPrime(n) {
-                var sqrtN = Math1.sqrt(n);
-                for(var factor = 2; factor <= sqrtN; factor++){
-                    if (!(n % factor)) return false;
-                }
-                return true;
-            }
-            function getFractionalBits(n) {
-                return (n - (n | 0)) * 0x100000000 | 0;
-            }
-            var n = 2;
-            var nPrime = 0;
-            while(nPrime < 64){
-                if (isPrime(n)) {
-                    if (nPrime < 8) H[nPrime] = getFractionalBits(Math1.pow(n, 0.5));
-                    K[nPrime] = getFractionalBits(Math1.pow(n, 1 / 3));
-                    nPrime++;
-                }
-                n++;
-            }
-        })();
-        // Reusable object
-        var W = [];
-        /**
-	     * SHA-256 hash algorithm.
-	     */ var SHA256 = C_algo.SHA256 = Hasher.extend({
-            _doReset: function() {
-                this._hash = new WordArray.init(H.slice(0));
-            },
-            _doProcessBlock: function(M, offset) {
-                // Shortcut
-                var H = this._hash.words;
-                // Working variables
-                var a = H[0];
-                var b = H[1];
-                var c = H[2];
-                var d = H[3];
-                var e = H[4];
-                var f = H[5];
-                var g = H[6];
-                var h = H[7];
-                // Computation
-                for(var i = 0; i < 64; i++){
-                    if (i < 16) W[i] = M[offset + i] | 0;
-                    else {
-                        var gamma0x = W[i - 15];
-                        var gamma0 = (gamma0x << 25 | gamma0x >>> 7) ^ (gamma0x << 14 | gamma0x >>> 18) ^ gamma0x >>> 3;
-                        var gamma1x = W[i - 2];
-                        var gamma1 = (gamma1x << 15 | gamma1x >>> 17) ^ (gamma1x << 13 | gamma1x >>> 19) ^ gamma1x >>> 10;
-                        W[i] = gamma0 + W[i - 7] + gamma1 + W[i - 16];
-                    }
-                    var ch = e & f ^ ~e & g;
-                    var maj = a & b ^ a & c ^ b & c;
-                    var sigma0 = (a << 30 | a >>> 2) ^ (a << 19 | a >>> 13) ^ (a << 10 | a >>> 22);
-                    var sigma1 = (e << 26 | e >>> 6) ^ (e << 21 | e >>> 11) ^ (e << 7 | e >>> 25);
-                    var t1 = h + sigma1 + ch + K[i] + W[i];
-                    var t2 = sigma0 + maj;
-                    h = g;
-                    g = f;
-                    f = e;
-                    e = d + t1 | 0;
-                    d = c;
-                    c = b;
-                    b = a;
-                    a = t1 + t2 | 0;
-                }
-                // Intermediate hash value
-                H[0] = H[0] + a | 0;
-                H[1] = H[1] + b | 0;
-                H[2] = H[2] + c | 0;
-                H[3] = H[3] + d | 0;
-                H[4] = H[4] + e | 0;
-                H[5] = H[5] + f | 0;
-                H[6] = H[6] + g | 0;
-                H[7] = H[7] + h | 0;
-            },
-            _doFinalize: function() {
-                // Shortcuts
-                var data = this._data;
-                var dataWords = data.words;
-                var nBitsTotal = this._nDataBytes * 8;
-                var nBitsLeft = data.sigBytes * 8;
-                // Add padding
-                dataWords[nBitsLeft >>> 5] |= 0x80 << 24 - nBitsLeft % 32;
-                dataWords[(nBitsLeft + 64 >>> 9 << 4) + 14] = Math1.floor(nBitsTotal / 0x100000000);
-                dataWords[(nBitsLeft + 64 >>> 9 << 4) + 15] = nBitsTotal;
-                data.sigBytes = dataWords.length * 4;
-                // Hash final blocks
-                this._process();
-                // Return final computed hash
-                return this._hash;
-            },
-            clone: function() {
-                var clone = Hasher.clone.call(this);
-                clone._hash = this._hash.clone();
-                return clone;
-            }
+        return item;
+    }
+    async getAllKeys() {
+        const store = await this.createStore(this._dbName, this._storeName);
+        return await store("readonly", (str)=>{
+            return this.promisifyRequest(str.getAllKeys());
         });
-        /**
-	     * Shortcut function to the hasher's object interface.
-	     *
-	     * @param {WordArray|string} message The message to hash.
-	     *
-	     * @return {WordArray} The hash.
-	     *
-	     * @static
-	     *
-	     * @example
-	     *
-	     *     var hash = CryptoJS.SHA256('message');
-	     *     var hash = CryptoJS.SHA256(wordArray);
-	     */ C.SHA256 = Hasher._createHelper(SHA256);
-        /**
-	     * Shortcut function to the HMAC's object interface.
-	     *
-	     * @param {WordArray|string} message The message to hash.
-	     * @param {WordArray|string} key The secret key.
-	     *
-	     * @return {WordArray} The HMAC.
-	     *
-	     * @static
-	     *
-	     * @example
-	     *
-	     *     var hmac = CryptoJS.HmacSHA256(message, key);
-	     */ C.HmacSHA256 = Hasher._createHmacHelper(SHA256);
-    })(Math);
-    return CryptoJS.SHA256;
-});
-
-},{"cd9e8447cb14a145":"g2BaY"}],"a3Jjc":[function(require,module,exports,__globalThis) {
-(function(root, factory) {
-    // CommonJS
-    module.exports = exports = factory(require("6c67d43f833ec62e"));
-})(this, function(CryptoJS) {
-    (function() {
-        // Shortcuts
-        var C = CryptoJS;
-        var C_lib = C.lib;
-        var WordArray = C_lib.WordArray;
-        var C_enc = C.enc;
-        /**
-	     * Base64 encoding strategy.
-	     */ var Base64 = C_enc.Base64 = {
-            /**
-	         * Converts a word array to a Base64 string.
-	         *
-	         * @param {WordArray} wordArray The word array.
-	         *
-	         * @return {string} The Base64 string.
-	         *
-	         * @static
-	         *
-	         * @example
-	         *
-	         *     var base64String = CryptoJS.enc.Base64.stringify(wordArray);
-	         */ stringify: function(wordArray) {
-                // Shortcuts
-                var words = wordArray.words;
-                var sigBytes = wordArray.sigBytes;
-                var map = this._map;
-                // Clamp excess bits
-                wordArray.clamp();
-                // Convert
-                var base64Chars = [];
-                for(var i = 0; i < sigBytes; i += 3){
-                    var byte1 = words[i >>> 2] >>> 24 - i % 4 * 8 & 0xff;
-                    var byte2 = words[i + 1 >>> 2] >>> 24 - (i + 1) % 4 * 8 & 0xff;
-                    var byte3 = words[i + 2 >>> 2] >>> 24 - (i + 2) % 4 * 8 & 0xff;
-                    var triplet = byte1 << 16 | byte2 << 8 | byte3;
-                    for(var j = 0; j < 4 && i + j * 0.75 < sigBytes; j++)base64Chars.push(map.charAt(triplet >>> 6 * (3 - j) & 0x3f));
-                }
-                // Add padding
-                var paddingChar = map.charAt(64);
-                if (paddingChar) while(base64Chars.length % 4)base64Chars.push(paddingChar);
-                return base64Chars.join('');
-            },
-            /**
-	         * Converts a Base64 string to a word array.
-	         *
-	         * @param {string} base64Str The Base64 string.
-	         *
-	         * @return {WordArray} The word array.
-	         *
-	         * @static
-	         *
-	         * @example
-	         *
-	         *     var wordArray = CryptoJS.enc.Base64.parse(base64String);
-	         */ parse: function(base64Str) {
-                // Shortcuts
-                var base64StrLength = base64Str.length;
-                var map = this._map;
-                var reverseMap = this._reverseMap;
-                if (!reverseMap) {
-                    reverseMap = this._reverseMap = [];
-                    for(var j = 0; j < map.length; j++)reverseMap[map.charCodeAt(j)] = j;
-                }
-                // Ignore padding
-                var paddingChar = map.charAt(64);
-                if (paddingChar) {
-                    var paddingIndex = base64Str.indexOf(paddingChar);
-                    if (paddingIndex !== -1) base64StrLength = paddingIndex;
-                }
-                // Convert
-                return parseLoop(base64Str, base64StrLength, reverseMap);
-            },
-            _map: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/='
+    }
+    promisifyRequest(request) {
+        return new Promise((resolve, reject)=>{
+            request.oncomplete = request.onsuccess = ()=>resolve(request.result);
+            request.onabort = request.onerror = ()=>reject(request.error);
+        });
+    }
+    async createStore(dbName, storeName) {
+        const request = indexedDB.open(dbName);
+        request.onupgradeneeded = ()=>request.result.createObjectStore(storeName);
+        const db = await this.promisifyRequest(request);
+        return async (txMode, callback)=>{
+            const tx = db.transaction(storeName, txMode);
+            const store = tx.objectStore(storeName);
+            return await callback(store);
         };
-        function parseLoop(base64Str, base64StrLength, reverseMap) {
-            var words = [];
-            var nBytes = 0;
-            for(var i = 0; i < base64StrLength; i++)if (i % 4) {
-                var bits1 = reverseMap[base64Str.charCodeAt(i - 1)] << i % 4 * 2;
-                var bits2 = reverseMap[base64Str.charCodeAt(i)] >>> 6 - i % 4 * 2;
-                var bitsCombined = bits1 | bits2;
-                words[nBytes >>> 2] |= bitsCombined << 24 - nBytes % 4 * 8;
-                nBytes++;
-            }
-            return WordArray.create(words, nBytes);
-        }
-    })();
-    return CryptoJS.enc.Base64;
-});
+    }
+};
 
-},{"6c67d43f833ec62e":"g2BaY"}],"hwYs8":[function(require,module,exports,__globalThis) {
-(function(root, factory) {
-    // CommonJS
-    module.exports = exports = factory(require("7286559b12995fed"));
-})(this, function(CryptoJS) {
-    return CryptoJS.enc.Utf8;
-});
-
-},{"7286559b12995fed":"g2BaY"}],"1Wg18":[function(require,module,exports,__globalThis) {
+},{"3455b80cc963b26":"4WbSe"}],"4WbSe":[function(require,module,exports,__globalThis) {
 var parcelHelpers = require("@parcel/transformer-js/src/esmodule-helpers.js");
 parcelHelpers.defineInteropFlag(exports);
-parcelHelpers.export(exports, "InvalidTokenError", ()=>n);
-function e(e) {
-    this.message = e;
+parcelHelpers.export(exports, "InvalidTokenError", ()=>InvalidTokenError);
+parcelHelpers.export(exports, "jwtDecode", ()=>jwtDecode);
+class InvalidTokenError extends Error {
 }
-e.prototype = new Error, e.prototype.name = "InvalidCharacterError";
-var r = "undefined" != typeof window && window.atob && window.atob.bind(window) || function(r) {
-    var t = String(r).replace(/=+$/, "");
-    if (t.length % 4 == 1) throw new e("'atob' failed: The string to be decoded is not correctly encoded.");
-    for(var n, o, a = 0, i = 0, c = ""; o = t.charAt(i++); ~o && (n = a % 4 ? 64 * n + o : o, a++ % 4) && (c += String.fromCharCode(255 & n >> (-2 * a & 6))))o = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=".indexOf(o);
-    return c;
-};
-function t(e) {
-    var t = e.replace(/-/g, "+").replace(/_/g, "/");
-    switch(t.length % 4){
+InvalidTokenError.prototype.name = "InvalidTokenError";
+function b64DecodeUnicode(str) {
+    return decodeURIComponent(atob(str).replace(/(.)/g, (m, p)=>{
+        let code = p.charCodeAt(0).toString(16).toUpperCase();
+        if (code.length < 2) code = "0" + code;
+        return "%" + code;
+    }));
+}
+function base64UrlDecode(str) {
+    let output = str.replace(/-/g, "+").replace(/_/g, "/");
+    switch(output.length % 4){
         case 0:
             break;
         case 2:
-            t += "==";
+            output += "==";
             break;
         case 3:
-            t += "=";
+            output += "=";
             break;
         default:
-            throw "Illegal base64url string!";
+            throw new Error("base64 string is not of the correct length");
     }
     try {
-        return function(e) {
-            return decodeURIComponent(r(e).replace(/(.)/g, function(e, r) {
-                var t = r.charCodeAt(0).toString(16).toUpperCase();
-                return t.length < 2 && (t = "0" + t), "%" + t;
-            }));
-        }(t);
-    } catch (e) {
-        return r(t);
+        return b64DecodeUnicode(output);
+    } catch (err) {
+        return atob(output);
     }
 }
-function n(e) {
-    this.message = e;
-}
-function o(e, r) {
-    if ("string" != typeof e) throw new n("Invalid token specified");
-    var o = !0 === (r = r || {}).header ? 0 : 1;
+function jwtDecode(token, options) {
+    if (typeof token !== "string") throw new InvalidTokenError("Invalid token specified: must be a string");
+    options || (options = {});
+    const pos = options.header === true ? 0 : 1;
+    const part = token.split(".")[pos];
+    if (typeof part !== "string") throw new InvalidTokenError(`Invalid token specified: missing part #${pos + 1}`);
+    let decoded;
     try {
-        return JSON.parse(t(e.split(".")[o]));
+        decoded = base64UrlDecode(part);
     } catch (e) {
-        throw new n("Invalid token specified: " + e.message);
+        throw new InvalidTokenError(`Invalid token specified: invalid base64 for part #${pos + 1} (${e.message})`);
+    }
+    try {
+        return JSON.parse(decoded);
+    } catch (e) {
+        throw new InvalidTokenError(`Invalid token specified: invalid json for part #${pos + 1} (${e.message})`);
     }
 }
-n.prototype = new Error, n.prototype.name = "InvalidTokenError";
-exports.default = o;
 
 },{"@parcel/transformer-js/src/esmodule-helpers.js":"jnFvT"}],"jnFvT":[function(require,module,exports,__globalThis) {
 exports.interopDefault = function(a) {
@@ -4348,11 +3936,12 @@ parcelHelpers.defineInteropFlag(exports);
 parcelHelpers.export(exports, "getUserFragments", ()=>getUserFragments);
 const apiUrl = "http://localhost:8080";
 async function getUserFragments(user) {
-    const response = await fetch(`${apiUrl}/v1/fragments`, {
+    const url = new URL('/v1/fragments', apiUrl);
+    const res = await fetch(url, {
         headers: user.authorizationHeaders()
     });
-    if (!response.ok) throw new Error(`Failed to get fragments: ${response.status}`);
-    return await response.json();
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    return res.json();
 }
 
 },{"@parcel/transformer-js/src/esmodule-helpers.js":"jnFvT"}]},["7wZbQ","2R06K"], "2R06K", "parcelRequirec284", {})
