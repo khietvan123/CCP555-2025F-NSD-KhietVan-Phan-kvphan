@@ -23,7 +23,6 @@ module.exports.strategy = () => authPassport(basic);
 
 /**
  * OPTIONAL: call during app bootstrap to register the 'http' strategy with passport
- * (Safe to call multiple times; passport will ignore duplicates.)
  */
 module.exports.init = () => {
   passport.use(module.exports.strategy());
@@ -31,16 +30,7 @@ module.exports.init = () => {
 };
 
 /**
- * ORIGINAL behavior (unchanged):
- * Authenticate via Passport using the 'http' strategy, WITHOUT hashing the user id.
- * Keep this so existing routes/tests continue to work exactly as before.
+ * DEFAULT: Use the hashed auth middleware for all new API routes.
+ * This ensures req.user.id is a SHA256 hash (from src/hash.js) and avoids exposing emails.
  */
-module.exports.authenticate = () => passport.authenticate('http', { session: false });
-
-/**
- * NEW (add-only):
- * Hashed auth middleware that delegates to our custom authorize() wrapper.
- * This sets req.user.id to a privacy-preserving hash of the username/email.
- * Use this in new routes where you want hashed user IDs (e.g., fragments APIs).
- */
-module.exports.authenticateHashed = () => authorize('http');
+module.exports.authenticate = () => authorize('http');
