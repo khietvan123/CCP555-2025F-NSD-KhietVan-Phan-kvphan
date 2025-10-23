@@ -1,3 +1,11 @@
 Remove-Item -Recurse -Force .git
 
 double check EC2 instance
+
+
+Push into main github for all works in the course CCP555:
+1. Remove .git cached : git rm --cached assignment1
+2. Remove .git folder : rmdir -Force -Recurse assignment1\.git
+3. git add.
+4. git commit
+5. git push
