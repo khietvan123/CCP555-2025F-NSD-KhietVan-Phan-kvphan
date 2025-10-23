@@ -1,0 +1,3 @@
+Remove-Item -Recurse -Force .git
+
+double check EC2 instance
